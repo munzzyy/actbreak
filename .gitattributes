@@ -1,0 +1,8 @@
+# Normalize line endings to LF on checkout everywhere. The injector tests
+# compare byte-for-byte, so a Windows checkout that rewrote LF to CRLF would
+# fail them even though the tool itself is correct.
+* text=auto eol=lf
+
+# This fixture is deliberately CRLF and a test asserts CRLF is preserved, so it
+# must never be normalized.
+tests/fixtures/crlf.yml -text
