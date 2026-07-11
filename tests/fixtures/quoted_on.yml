@@ -1,0 +1,23 @@
+# Some workflows quote the "on" key to dodge tools (looking at you, PyYAML)
+# that coerce an unquoted `on:` to the boolean True under YAML 1.1 rules.
+# actbreak must never touch this line either way, quoted or not.
+"on":
+  push:
+    branches:
+      - main
+      - "release/*"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Deploy
+        run: ./deploy.sh "${{ inputs.environment }}"

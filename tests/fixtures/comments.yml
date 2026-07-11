@@ -1,0 +1,23 @@
+# Top-of-file comment.
+name: Commented CI
+# A comment between top-level keys.
+on:
+  push:
+    branches: [main] # inline comment on a value line
+
+# A comment right before jobs:.
+jobs:
+  # A comment before the first job key.
+  build:
+    # A comment inside the job body, before runs-on.
+    runs-on: ubuntu-latest
+    steps:
+      # A comment before the first step.
+      - name: Checkout
+        uses: actions/checkout@v4
+      # A comment between steps.
+      - name: Run tests
+        # A comment inside a step, before its run: key.
+        run: pytest -v
+        # A comment after run:, still inside the step.
+      # A comment after the last step (still under steps:, before dedent).

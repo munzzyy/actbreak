@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "actbreak"
+version = "0.1.0"
+description = "A local breakpoint debugger for GitHub Actions workflows, wrapping act."
+readme = "README.md"
+license = { text = "Prosperity Public License 3.0.0" }
+requires-python = ">=3.9"
+authors = [{ name = "Cole Munz" }]
+keywords = ["github-actions", "act", "debugger", "breakpoint", "ci", "local-ci"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/munzzyy/actbreak"
+Issues = "https://github.com/munzzyy/actbreak/issues"
+
+[project.scripts]
+actbreak = "actbreak.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["actbreak*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: real act + docker/podman end-to-end test; auto-skipped when either is absent",
+]

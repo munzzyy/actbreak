@@ -1,0 +1,13 @@
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Build: the app"
+        run: make build
+      - name: 'It''s a test: quoted'
+        run: make test
+      - name: Deploy # trailing comment, not part of the name
+        run: ./deploy.sh
