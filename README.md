@@ -60,6 +60,19 @@ by zero-based position (use this for steps with no `name:`).
 | `--act-arg ARG` | extra argument passed through to `act` (repeatable) |
 | `-v`, `--verbose` | print the injection/act commands being run |
 
+### Shell completions
+
+`actbreak --completions bash` (or `zsh`) prints a completion script built
+from the argparse parser, so new flags show up without touching it:
+
+```bash
+# bash
+source <(actbreak --completions bash)
+
+# zsh
+source <(actbreak --completions zsh)
+```
+
 ### Examples
 
 ```

@@ -32,6 +32,17 @@ notes:
 """
 
 
+class PrintCompletionsAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .completions import generate_bash, generate_zsh
+
+        if values == "bash":
+            print(generate_bash(parser), end="")
+        elif values == "zsh":
+            print(generate_zsh(parser), end="")
+        parser.exit(0)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
@@ -40,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--completions",
+        choices=["bash", "zsh"],
+        action=PrintCompletionsAction,
+        help="print shell completion script",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 

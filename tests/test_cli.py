@@ -3,6 +3,8 @@ subprocess/act/docker calls ever happen -- only argparse wiring is tested."""
 
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
 from unittest import mock
 
@@ -69,6 +71,33 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             parser.parse_args(["--version"])
         self.assertEqual(ctx.exception.code, 0)
+
+    def _completions(self, shell):
+        parser = build_parser()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as ctx:
+                parser.parse_args(["--completions", shell])
+        self.assertEqual(ctx.exception.code, 0)
+        return buf.getvalue()
+
+    def test_completions_bash_covers_parser(self):
+        out = self._completions("bash")
+        self.assertIn("_actbreak() {", out)
+        for token in ("run", "resume", "clean", "--version", "--completions",
+                      "--break-before", "--break-after", "--break-on-failure",
+                      "--job", "--runtime", "--no-attach", "--act-arg",
+                      "-v", "--verbose"):
+            self.assertIn(token, out)
+
+    def test_completions_zsh_covers_parser(self):
+        out = self._completions("zsh")
+        self.assertIn("#compdef actbreak", out)
+        for token in ('"run"', '"resume"', '"clean"', '"--version"',
+                      '"--completions"', '"--break-before"', '"--break-after"',
+                      '"--break-on-failure"', '"--job"', '"--runtime"',
+                      '"--no-attach"', '"--act-arg"', '"-v"', '"--verbose"'):
+            self.assertIn(token, out)
 
     def test_missing_command_is_an_error(self):
         parser = build_parser()
