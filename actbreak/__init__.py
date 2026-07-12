@@ -5,4 +5,4 @@ before or after a chosen step, waits for the container to reach it, then
 drops you into a live shell inside the running job container.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

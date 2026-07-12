@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "actbreak"
-version = "0.1.0"
+version = "0.1.1"
 description = "A local breakpoint debugger for GitHub Actions workflows, wrapping act."
 readme = "README.md"
 license = { text = "Prosperity Public License 3.0.0" }
