@@ -1,0 +1,15 @@
+name: Block Scalar Name CI
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: >-
+          Deploy to prod
+          (fix bug #123)
+        run: echo deploying
+      - name: |
+          Literal
+          multi-line
+        run: echo literal

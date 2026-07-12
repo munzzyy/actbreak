@@ -91,15 +91,95 @@ class InjectorParsingTests(unittest.TestCase):
         names = [s.name for s in jobs["build"].steps]
         self.assertEqual(names, ["Checkout", "Run tests"])
 
+    def test_flush_left_steps_at_same_column_as_steps_key(self):
+        # `- uses: ...` sitting at the SAME column as `steps:` (rather than
+        # indented further) is common and PyYAML-valid. A trailing sibling
+        # key (`timeout-minutes:`) back at that column must end the list,
+        # not be mistaken for a malformed step.
+        _, _, jobs, _ = load("flush_left_steps.yml")
+        self.assertEqual(list(jobs.keys()), ["test"])
+        names = [s.name for s in jobs["test"].steps]
+        self.assertEqual(names, [None, None])
+
     def test_tabs_rejected_with_clear_error(self):
         with self.assertRaises(InjectionError) as ctx:
             load("tabs.yml")
         self.assertIn("tab", str(ctx.exception).lower())
 
+    def test_tab_after_run_block_scalar_closes_is_still_rejected(self):
+        # A tab that's genuine YAML structure, appearing AFTER a block
+        # scalar has dedented back out, must still be caught -- the
+        # block-scalar exemption has to turn back off, not stick forever.
+        lines = [
+            "jobs:\n",
+            "  build:\n",
+            "    runs-on: ubuntu-latest\n",
+            "    steps:\n",
+            "      - name: Build\n",
+            "        run: |\n",
+            "          echo hi\n",
+            "      - name: Bad\n",
+            "\t\turi: oops\n",
+        ]
+        with self.assertRaises(InjectionError) as ctx:
+            injector.parse_workflow(lines)
+        self.assertIn("tab", str(ctx.exception).lower())
+
+    def test_tab_inside_run_block_scalar_is_data_not_indentation(self):
+        # A tab-indented Makefile recipe line embedded in `run: |` is a real,
+        # common pattern -- the tab is DATA inside the literal block scalar,
+        # not YAML structural indentation, and PyYAML parses it fine.
+        _, _, jobs, _ = load("tab_in_run_block.yml")
+        names = [s.name for s in jobs["build"].steps]
+        self.assertEqual(names, ["Write Makefile", "Run tests"])
+
+    def test_block_scalar_step_names_decoded_not_left_as_the_indicator(self):
+        _, _, jobs, _ = load("block_scalar_name.yml")
+        names = [s.name for s in jobs["build"].steps]
+        # Folded (`>-`) joins its continuation lines with spaces -- matches
+        # PyYAML's own fold here exactly (no blank lines in the value).
+        self.assertEqual(names[0], "Deploy to prod (fix bug #123)")
+        # Literal (`|`) is a best-effort space-joined rendering (this module
+        # is deliberately not a full YAML parser); it must NOT be the bare
+        # "|" indicator, and must not choke on multi-line content.
+        self.assertEqual(names[1], "Literal multi-line")
+
+    def test_block_scalar_name_with_no_continuation_is_unnamed_not_the_indicator(self):
+        # `name: |` immediately followed by a dedent (no continuation lines
+        # at all) has no text to recover -- falls back to unnamed (None,
+        # selectable by job:index) rather than surfacing "|" as if it were
+        # a real name.
+        lines = [
+            "jobs:\n",
+            "  build:\n",
+            "    runs-on: ubuntu-latest\n",
+            "    steps:\n",
+            "      - name: |\n",
+            "        run: echo hi\n",
+        ]
+        jobs = injector.parse_workflow(lines)
+        self.assertIsNone(jobs["build"].steps[0].name)
+
     def test_no_top_level_jobs_key_rejected(self):
         lines = ["name: broken\n", "on: push\n"]
         with self.assertRaises(InjectionError):
             injector.parse_workflow(lines)
+
+    def test_jobs_line_with_trailing_whitespace_accepted(self):
+        # "jobs: " (trailing space, no comment) is valid YAML -- the job-key
+        # regex already tolerates this, `_JOBS_LINE_RE` should too.
+        lines = [
+            "name: CI\n",
+            "on: push\n",
+            "jobs: \n",
+            "  build:\n",
+            "    runs-on: ubuntu-latest\n",
+            "    steps:\n",
+            "      - run: echo hi\n",
+        ]
+        jobs = injector.parse_workflow(lines)
+        self.assertEqual(list(jobs.keys()), ["build"])
+        self.assertEqual(len(jobs["build"].steps), 1)
 
 
 class InjectorSpliceTests(unittest.TestCase):
@@ -143,6 +223,19 @@ class InjectorSpliceTests(unittest.TestCase):
         self.assertEqual(len(result_jobs["test"].steps), 3)
         self.assertEqual(len(result_jobs["build"].steps), 4)
 
+    def test_flush_left_steps_splice_lands_correctly(self):
+        text, lines, jobs, _ = load("flush_left_steps.yml")
+        job, idx = resolve_selector(jobs, "test:1")
+        result = assert_exact_splice(text, lines, jobs, job, idx, "before")
+        result_text = "".join(result)
+        # The injected step's dash must sit at the same flush-left column
+        # (4) as the workflow's own steps, not drift to some other indent.
+        self.assertIn('    - name: "actbreak breakpoint', result_text)
+        # timeout-minutes: must still be a sibling of steps:, untouched.
+        self.assertIn("    timeout-minutes: 5\n", result_text)
+        result_jobs = injector.parse_workflow(result_text.splitlines(keepends=True))
+        self.assertEqual(len(result_jobs["test"].steps), 3)
+
     def test_ambiguous_step_name_across_jobs_needs_job_hint(self):
         _, _, jobs, _ = load("multi_job.yml")
         with self.assertRaises(Exception):
@@ -158,6 +251,16 @@ class InjectorSpliceTests(unittest.TestCase):
         result_jobs = injector.parse_workflow("".join(result).splitlines(keepends=True))
         self.assertEqual(len(result_jobs["build"].steps), 6)
 
+    def test_block_scalar_step_name_splice_and_selector(self):
+        text, lines, jobs, _ = load("block_scalar_name.yml")
+        # The decoded name must be usable as a --break-before/--break-after
+        # selector, and the banner must show the real name, not ">-"/"|" .
+        job, idx = resolve_selector(jobs, "Deploy to prod (fix bug #123)")
+        result = assert_exact_splice(text, lines, jobs, job, idx, "before")
+        result_text = "".join(result)
+        self.assertIn("step: Deploy to prod (fix bug #123)", result_text)
+        self.assertNotIn("step: >-", result_text)
+
     def test_colon_and_quoted_names_splice(self):
         text, lines, jobs, _ = load("colon_names.yml")
         job, idx = resolve_selector(jobs, "It's a test: quoted")
@@ -171,6 +274,13 @@ class InjectorSpliceTests(unittest.TestCase):
         self.assertIn("# Top-of-file comment.\n", result_text)
         self.assertIn("# A comment inside a step, before its run: key.\n", result_text)
         self.assertIn("# A comment after the last step (still under steps:, before dedent).\n", result_text)
+
+    def test_tab_inside_run_block_scalar_splice_untouched(self):
+        text, lines, jobs, _ = load("tab_in_run_block.yml")
+        job, idx = resolve_selector(jobs, "Run tests")
+        result = assert_exact_splice(text, lines, jobs, job, idx, "before")
+        # The Makefile's literal tab must survive byte-for-byte.
+        self.assertIn("          \tgcc -o out main.c\n", "".join(result))
 
     def test_crlf_line_endings_preserved(self):
         text, lines, jobs, _ = load("crlf.yml")

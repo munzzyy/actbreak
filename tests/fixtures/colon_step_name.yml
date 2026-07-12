@@ -1,0 +1,11 @@
+name: Colon Step Name CI
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: "deploy:2"
+        run: ./deploy.sh

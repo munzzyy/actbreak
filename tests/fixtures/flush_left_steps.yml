@@ -1,0 +1,10 @@
+name: Flush Left CI
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: echo hi
+    timeout-minutes: 5

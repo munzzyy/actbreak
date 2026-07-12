@@ -76,6 +76,19 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(SelectorError):
             resolve_selector(jobs, "")
 
+    def test_step_named_like_a_job_index_falls_back_to_name_match(self):
+        # A step literally named "deploy:2" matches the job:index regex, but
+        # there's no job called "deploy" -- must retry as a literal name
+        # instead of raising "job 'deploy' not found".
+        jobs = parsed("colon_step_name.yml")
+        self.assertEqual(resolve_selector(jobs, "deploy:2"), ("build", 1))
+
+    def test_job_index_still_wins_when_it_actually_resolves(self):
+        # Regression guard: the name-fallback must not shadow a genuinely
+        # valid job:index selector.
+        jobs = parsed("colon_step_name.yml")
+        self.assertEqual(resolve_selector(jobs, "build:1"), ("build", 1))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .errors import ContainerNotFoundError, ToolNotFoundError
+from .errors import AmbiguousContainerError, ContainerNotFoundError, ToolNotFoundError
 
 PS_FORMAT = "{{.ID}}\t{{.Names}}\t{{.Status}}"
 
@@ -99,7 +99,7 @@ def find_job_container(
         )
     if len(candidates) > 1:
         names = ", ".join(c.name for c in candidates)
-        raise ContainerNotFoundError(
+        raise AmbiguousContainerError(
             f"multiple containers match job '{job}': {names}; narrow with the workflow name"
         )
     return candidates[0]

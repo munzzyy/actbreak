@@ -39,8 +39,18 @@ from .errors import InjectionError
 
 _KEY_LINE_RE = re.compile(r"^( *)([^\s:][^:]*):(?:\s.*)?$")
 _DASH_LINE_RE = re.compile(r"^( *)-(?:\s(.*)|)$")
-_JOBS_LINE_RE = re.compile(r"^jobs:(?:\s*#.*)?$")
+_JOBS_LINE_RE = re.compile(r"^jobs:[ \t]*(?:#.*)?$")
 _NAME_KEY_RE = re.compile(r"^name:\s*(.*)$")
+# A `key: |` / `key: >` block-scalar header (with optional chomp `-`/`+` and
+# explicit indentation-indicator digit, in either order) -- everything more
+# indented than this line, until the next dedent, is opaque literal DATA,
+# not YAML structure.
+_BLOCK_SCALAR_HEADER_RE = re.compile(r"^( *)[^\s:][^:]*:[ \t]*[|>][+-]?[0-9]?[+-]?[ \t]*(?:#.*)?$")
+# The bare value half of the same header (e.g. the ">-" in "name: >-"),
+# matched after a key's value has already been split off by _NAME_KEY_RE.
+# An unquoted scalar can never legally start with `|`/`>` (they're reserved
+# YAML indicators), so this can't misfire on ordinary plain-text names.
+_BLOCK_SCALAR_VALUE_RE = re.compile(r"^[|>][+-]?[0-9]?[+-]?(?:\s*#.*)?$")
 
 
 @dataclass
@@ -80,16 +90,32 @@ def _is_blank_or_comment(line: str) -> bool:
 
 
 def _check_no_tabs(lines: list[str]) -> None:
+    # A tab inside a literal/folded block scalar (`run: |`, most often) is
+    # DATA -- a Makefile recipe line, for example -- not YAML structural
+    # indentation, and must not be rejected. Track the indent of the most
+    # recent block-scalar header and skip everything more indented than it,
+    # until a dedent takes us back out.
+    block_scalar_indent: int | None = None
     for i, line in enumerate(lines):
         content = _rstrip_eol(line)
         j = 0
         while j < len(content) and content[j] in " \t":
             j += 1
+
+        if block_scalar_indent is not None:
+            if content.strip() == "" or j > block_scalar_indent:
+                continue
+            block_scalar_indent = None  # dedented back out of the block scalar
+
         if "\t" in content[:j]:
             raise InjectionError(
                 f"line {i + 1}: tab characters in indentation are not supported "
                 "by actbreak's line-based injector; re-indent this workflow with spaces"
             )
+
+        m = _BLOCK_SCALAR_HEADER_RE.match(content)
+        if m:
+            block_scalar_indent = len(m.group(1))
 
 
 def _first_content(lines: list[str], start: int, limit: int) -> tuple[int | None, int | None]:
@@ -189,12 +215,32 @@ def _extract_step_name(lines: list[str], start: int, end: int, dash_indent: int)
     if not items:
         return None
     body_col = items[0][0]
-    for col, text in items:
+    for i, (col, text) in enumerate(items):
         if col != body_col:
             continue
         m = _NAME_KEY_RE.match(text)
-        if m:
-            return _parse_scalar_value(m.group(1))
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if _BLOCK_SCALAR_VALUE_RE.match(value):
+            # A folded/literal name (`name: >-`, `name: |`, ...) -- the
+            # "value" captured above is just the bare indicator, not the
+            # name. Read the deeper-indented continuation lines instead.
+            # We don't replicate YAML's exact fold/chomp rules (this module
+            # deliberately isn't a YAML parser): join every continuation
+            # line with a single space, the same best-effort flattening
+            # `_banner_safe` already does for banner text elsewhere here.
+            # That happens to match real YAML folding (`>`) exactly for the
+            # common case (no blank lines in the value); for literal (`|`)
+            # it trades exact newline fidelity for a usable one-line name.
+            parts = []
+            for c, t in items[i + 1 :]:
+                if c <= body_col:
+                    break
+                parts.append(t.strip())
+            joined = " ".join(parts).strip()
+            return joined or None
+        return _parse_scalar_value(m.group(1))
     return None
 
 
@@ -225,7 +271,12 @@ def _parse_job_steps(lines: list[str], job: JobInfo) -> None:
         return  # job has no steps: (e.g. it only calls a reusable workflow via `uses:`)
 
     step_start0, step_item_indent = _first_content(lines, steps_line + 1, job.end)
-    if step_start0 is None or step_item_indent is None or step_item_indent <= body_indent:
+    # step_item_indent == body_indent is the flush-left style (`- ...` at the
+    # SAME column as `steps:` itself, rather than indented under it) -- valid
+    # YAML and common in the wild. Only a genuine dedent (nothing at all
+    # under steps:) is unrecognizable; the dash-line check right below still
+    # catches a same-column line that isn't actually a step.
+    if step_start0 is None or step_item_indent is None or step_item_indent < body_indent:
         raise InjectionError(f"job '{job.name}': 'steps:' has no recognizable list of steps")
     first_line = _rstrip_eol(lines[step_start0])
     if not (len(first_line) > step_item_indent and first_line[step_item_indent] == "-"):
@@ -249,6 +300,12 @@ def _parse_job_steps(lines: list[str], job: JobInfo) -> None:
             continue
         m = _DASH_LINE_RE.match(_rstrip_eol(lines[i]))
         if not m:
+            # In the flush-left style, the step list shares its column with
+            # the job's OTHER keys (e.g. `timeout-minutes:` right after the
+            # last `- ...` step) since there's no dedent to signal the list
+            # ended. A key line here is that boundary, not a malformed item.
+            if step_item_indent == body_indent and _KEY_LINE_RE.match(_rstrip_eol(lines[i])):
+                break
             raise InjectionError(f"job '{job.name}': malformed step list item at line {i + 1}")
         step_end = _next_boundary(lines, i + 1, job.end, step_item_indent)
         name = _extract_step_name(lines, i, step_end, step_item_indent)

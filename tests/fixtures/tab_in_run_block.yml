@@ -1,0 +1,16 @@
+name: Makefile CI
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write Makefile
+        run: |
+          cat > Makefile <<'EOF'
+          build:
+          	gcc -o out main.c
+          EOF
+          make build
+      - name: Run tests
+        run: echo done

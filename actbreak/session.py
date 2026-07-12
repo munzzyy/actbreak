@@ -1,11 +1,11 @@
 """Orchestration for `actbreak run`, `actbreak resume`, and `actbreak clean`.
 
 This is the layer that actually shells out to `act` and to docker/podman.
-It can't be meaningfully unit tested without a real container runtime and a
-real `act` binary -- that end-to-end path is covered by the CI integration
-test (tests/test_integration.py), which is skipped locally when docker+act
-aren't present. The pieces it's built from (injector, selector, runtime
-parsing) are fully unit tested; this module is where they're wired together.
+tests/test_session.py unit-tests it against fakes (an injectable
+CommandRunner, a fake Popen) the same way runtime.py is tested; the one
+thing fakes can't stand in for is a real breakpoint pausing a real
+container, which is covered end-to-end by the CI integration test
+(tests/test_integration.py), skipped locally when docker+act aren't present.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import injector
-from .errors import ActbreakError, ContainerNotFoundError, SessionError
+from .errors import ActbreakError, AmbiguousContainerError, ContainerNotFoundError, SessionError
 from .runtime import CommandRunner, Container, detect_runtime, find_job_container, normalize_name, require_act
 from .selector import resolve_selector
 
@@ -143,6 +143,29 @@ def _attach_command_str(engine: str, container_name: str, shell: str = "sh") -> 
     return " ".join(shlex.quote(p) for p in (engine, "exec", "-it", container_name, shell))
 
 
+def _terminate_act_and_container(
+    proc: subprocess.Popen, runner: CommandRunner, engine: str, job_name: str | None, workflow_hint: str | None
+) -> None:
+    """Best-effort cleanup for every cmd_run exit path that isn't leaving a
+    supported, resumable session behind: kill `act` if it's still running
+    (it was spawned start_new_session=True, so nothing else will ever reap
+    it) and remove its job container, if one was ever created. Shared by
+    the interrupted and the give-up-waiting (SessionError) paths."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    try:
+        containers = runner.ps(engine, all_containers=True)
+        container = find_job_container(containers, job_name, workflow_hint) if job_name else None
+        if container is not None:
+            runner.rm_container(engine, container.name)
+    except (ContainerNotFoundError, ActbreakError):
+        pass
+
+
 def wait_for_breakpoint(
     proc: subprocess.Popen,
     runner: CommandRunner,
@@ -166,6 +189,11 @@ def wait_for_breakpoint(
         try:
             containers = runner.ps(engine)
             container = find_job_container(containers, job_name, workflow_hint)
+        except AmbiguousContainerError as e:
+            # More than one candidate container is never going to resolve
+            # itself by waiting -- surface it now instead of spinning for
+            # up to `timeout` and then reporting a misleading "timed out".
+            raise SessionError(str(e)) from e
         except ContainerNotFoundError:
             time.sleep(POLL_INTERVAL)
             continue
@@ -291,20 +319,19 @@ def cmd_run(args) -> int:
         return exit_code
     except _Interrupted:
         print("\nactbreak: interrupted, cleaning up", file=sys.stderr)
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        try:
-            containers = runner.ps(engine, all_containers=True)
-            container = find_job_container(containers, job_name, workflow_hint) if job_name else None
-            if container is not None:
-                runner.rm_container(engine, container.name)
-        except (ContainerNotFoundError, ActbreakError):
-            pass
+        _terminate_act_and_container(proc, runner, engine, job_name, workflow_hint)
         return 130
+    except SessionError:
+        # wait_for_breakpoint gave up (timed out, or an ambiguous container
+        # set that was never going to resolve on its own). Without this,
+        # `act` -- spawned start_new_session=True -- is orphaned and keeps
+        # running detached, and its job container pauses forever unattended
+        # at the injected hold once it gets there, since no session was
+        # ever recorded for `actbreak resume` to find. Clean up, then let
+        # the SessionError keep propagating so the user still sees why.
+        print("actbreak: giving up, cleaning up", file=sys.stderr)
+        _terminate_act_and_container(proc, runner, engine, job_name, workflow_hint)
+        raise
     finally:
         signal.signal(signal.SIGINT, old_int)
         signal.signal(signal.SIGTERM, old_term)
@@ -324,6 +351,7 @@ def cmd_resume(args) -> int:
         return 1
     runner = CommandRunner()
     ok = True
+    unresolved = []
     for s in sessions:
         try:
             runner.rm_file(s["runtime"], s["container_id"], "/tmp/actbreak/hold")
@@ -331,8 +359,13 @@ def cmd_resume(args) -> int:
         except Exception as e:  # defensive: a bad/stale session entry shouldn't block the rest
             ok = False
             print(f"actbreak: failed to resume {s.get('container_name', '?')}: {e}", file=sys.stderr)
+            # Its container is presumably still held -- keep the record so
+            # it stays resumable/cleanable instead of only recoverable
+            # through `clean`'s stray-container sweep.
+            unresolved.append(s)
+            continue
         _cleanup_tmpdir(s.get("tmpdir"))
-    _save_sessions([])
+    _save_sessions(unresolved)
     return 0 if ok else 1
 
 

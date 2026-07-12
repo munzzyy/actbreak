@@ -28,5 +28,13 @@ class ContainerNotFoundError(ActbreakError):
     """The job's container could not be found (or was ambiguous) via `ps`."""
 
 
+class AmbiguousContainerError(ContainerNotFoundError):
+    """More than one container matched the job. Distinct from the plain
+    not-found case because it's a subclass of ContainerNotFoundError so
+    existing `except ContainerNotFoundError` call sites still catch it
+    unchanged -- callers that need to treat "ambiguous" differently from
+    "not found yet, keep polling" can catch this more specific type first."""
+
+
 class SessionError(ActbreakError):
     """A resume/clean operation failed against the on-disk session state."""
