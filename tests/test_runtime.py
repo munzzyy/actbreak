@@ -121,6 +121,17 @@ class FindJobContainerTests(unittest.TestCase):
         c = find_job_container(containers, "say hello")
         self.assertEqual(c.id, "x")
 
+    def test_short_job_name_does_not_substring_match_a_longer_token(self):
+        # job "test" must not match the "latest" token in a matrix suffix.
+        containers = [Container(id="x", name="act-CI-deploy-ubuntu-latest")]
+        with self.assertRaises(ContainerNotFoundError):
+            find_job_container(containers, "test")
+
+    def test_single_letter_job_does_not_match_everything(self):
+        containers = [Container(id="x", name="act-Build-and-Test-build")]
+        with self.assertRaises(ContainerNotFoundError):
+            find_job_container(containers, "a")
+
 
 class DetectRuntimeTests(unittest.TestCase):
     def test_auto_prefers_docker(self):

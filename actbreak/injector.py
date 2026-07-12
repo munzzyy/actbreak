@@ -316,6 +316,12 @@ def _sh_single_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
+def _banner_safe(s: str) -> str:
+    """Fold any whitespace run (newlines included) to a single space so the
+    value stays on one physical line inside the run: | block scalar."""
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newline: str) -> list[str]:
     """Build the synthetic breakpoint step, as a list of complete lines (each
     already carrying `newline`), indented to slot into `job`'s steps list at
@@ -323,6 +329,12 @@ def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newl
     key_indent = dash_indent + 2
     body_indent = key_indent + 2
     step_name = f"actbreak breakpoint ({position} '{label}' in job '{job}')"
+    # Banner text is single-line display only. A step name can legally carry a
+    # newline (a double-quoted "a\nb" decodes to one), which would otherwise
+    # break out of the echo line and corrupt the `run: |` block scalar, and
+    # printf keeps a leading -e/-n or a \c in the name from being eaten.
+    job_banner = _banner_safe(job)
+    label_banner = _banner_safe(label)
 
     out: list[str] = []
 
@@ -336,16 +348,16 @@ def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newl
     script = [
         "mkdir -p /tmp/actbreak",
         ": > /tmp/actbreak/hold",
-        "echo " + _sh_single_quote("=================================================="),
-        "echo " + _sh_single_quote(f"actbreak: BREAKPOINT HIT ({position})"),
-        "echo " + _sh_single_quote(f"actbreak:   job:  {job}"),
-        "echo " + _sh_single_quote(f"actbreak:   step: {label}"),
-        "echo " + _sh_single_quote(
+        "printf '%s\\n' " + _sh_single_quote("=================================================="),
+        "printf '%s\\n' " + _sh_single_quote(f"actbreak: BREAKPOINT HIT ({position})"),
+        "printf '%s\\n' " + _sh_single_quote(f"actbreak:   job:  {job_banner}"),
+        "printf '%s\\n' " + _sh_single_quote(f"actbreak:   step: {label_banner}"),
+        "printf '%s\\n' " + _sh_single_quote(
             "actbreak: run 'actbreak resume', or delete /tmp/actbreak/hold in this container"
         ),
-        "echo " + _sh_single_quote("=================================================="),
+        "printf '%s\\n' " + _sh_single_quote("=================================================="),
         "while [ -f /tmp/actbreak/hold ]; do sleep 1; done",
-        "echo " + _sh_single_quote("actbreak: resumed, continuing workflow"),
+        "printf '%s\\n' " + _sh_single_quote("actbreak: resumed, continuing workflow"),
     ]
     for line in script:
         emit(line, body_indent)

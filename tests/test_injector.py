@@ -221,19 +221,28 @@ class InjectorGoldenTests(unittest.TestCase):
             "        run: |\n"
             "          mkdir -p /tmp/actbreak\n"
             "          : > /tmp/actbreak/hold\n"
-            "          echo '=================================================='\n"
-            "          echo 'actbreak: BREAKPOINT HIT (before)'\n"
-            "          echo 'actbreak:   job:  build'\n"
-            "          echo 'actbreak:   step: Run tests'\n"
-            "          echo 'actbreak: run '\"'\"'actbreak resume'\"'\"', or delete /tmp/actbreak/hold in this container'\n"
-            "          echo '=================================================='\n"
+            "          printf '%s\\n' '=================================================='\n"
+            "          printf '%s\\n' 'actbreak: BREAKPOINT HIT (before)'\n"
+            "          printf '%s\\n' 'actbreak:   job:  build'\n"
+            "          printf '%s\\n' 'actbreak:   step: Run tests'\n"
+            "          printf '%s\\n' 'actbreak: run '\"'\"'actbreak resume'\"'\"', or delete /tmp/actbreak/hold in this container'\n"
+            "          printf '%s\\n' '=================================================='\n"
             "          while [ -f /tmp/actbreak/hold ]; do sleep 1; done\n"
-            "          echo 'actbreak: resumed, continuing workflow'\n"
+            "          printf '%s\\n' 'actbreak: resumed, continuing workflow'\n"
             "      - name: Run tests\n"
             "        run: pytest -v\n"
             "      - run: echo done\n"
         )
         self.assertEqual("".join(result), expected)
+
+    def test_newline_in_label_stays_on_one_block_line(self):
+        # A double-quoted step name decodes "a\nb" to a real newline; it must be
+        # folded so it can't break out of the run: | block and corrupt the YAML.
+        lines = injector.build_hold_lines("build", "Build\nand Test", "before", 6, "\n")
+        for ln in lines:
+            body = ln.rstrip("\n")
+            self.assertTrue(body == "" or body.startswith(" "), repr(ln))
+        self.assertIn("step: Build and Test", "".join(lines))
 
     def test_crlf_break_after_golden(self):
         text, lines, jobs, _ = load("crlf.yml")
@@ -255,14 +264,14 @@ class InjectorGoldenTests(unittest.TestCase):
             "        run: |\r\n"
             "          mkdir -p /tmp/actbreak\r\n"
             "          : > /tmp/actbreak/hold\r\n"
-            "          echo '=================================================='\r\n"
-            "          echo 'actbreak: BREAKPOINT HIT (after)'\r\n"
-            "          echo 'actbreak:   job:  build'\r\n"
-            "          echo 'actbreak:   step: Checkout'\r\n"
-            "          echo 'actbreak: run '\"'\"'actbreak resume'\"'\"', or delete /tmp/actbreak/hold in this container'\r\n"
-            "          echo '=================================================='\r\n"
+            "          printf '%s\\n' '=================================================='\r\n"
+            "          printf '%s\\n' 'actbreak: BREAKPOINT HIT (after)'\r\n"
+            "          printf '%s\\n' 'actbreak:   job:  build'\r\n"
+            "          printf '%s\\n' 'actbreak:   step: Checkout'\r\n"
+            "          printf '%s\\n' 'actbreak: run '\"'\"'actbreak resume'\"'\"', or delete /tmp/actbreak/hold in this container'\r\n"
+            "          printf '%s\\n' '=================================================='\r\n"
             "          while [ -f /tmp/actbreak/hold ]; do sleep 1; done\r\n"
-            "          echo 'actbreak: resumed, continuing workflow'\r\n"
+            "          printf '%s\\n' 'actbreak: resumed, continuing workflow'\r\n"
             "      - name: Run tests\r\n"
             "        run: pytest -v\r\n"
         )

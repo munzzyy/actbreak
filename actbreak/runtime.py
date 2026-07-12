@@ -62,14 +62,29 @@ def normalize_name(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
+def _name_tokens(s: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9]+", s.lower()) if t]
+
+
+def _job_in_name(name: str, job: str) -> bool:
+    """True when `job` appears as a run of whole delimited tokens in `name`,
+    not just as a substring. Keeps job 'a' or 'test' from matching inside an
+    unrelated token like 'latest', while still matching a multi-word job
+    ('say hello' -> the tokens say, hello) across act's dash/underscore joins."""
+    ntoks = _name_tokens(name)
+    jtoks = _name_tokens(job)
+    if not jtoks:
+        return False
+    return any(ntoks[i:i + len(jtoks)] == jtoks for i in range(len(ntoks) - len(jtoks) + 1))
+
+
 def find_job_container(
     containers: list[Container], job: str, workflow: str | None = None
 ) -> Container:
     """Find the single container act started for `job` (optionally narrowed
     by `workflow`). Raises ContainerNotFoundError if there's none or more
     than one match."""
-    njob = normalize_name(job)
-    candidates = [c for c in containers if c.name.lower().startswith("act-") and njob in normalize_name(c.name)]
+    candidates = [c for c in containers if c.name.lower().startswith("act-") and _job_in_name(c.name, job)]
 
     if workflow:
         nwf = normalize_name(workflow)
@@ -136,11 +151,16 @@ class CommandRunner:
         return parse_ps_output(result.stdout or "")
 
     def file_exists(self, engine: str, container: str, path: str) -> bool:
-        result = self._run([engine, "exec", container, "test", "-f", path], check=False)
+        # Capture output: these run inside the job container while we poll, and a
+        # workflow that swapped test/rm for something spewing ANSI escapes could
+        # otherwise write straight to the developer's terminal.
+        result = self._run([engine, "exec", container, "test", "-f", path],
+                           capture_output=True, text=True, check=False)
         return getattr(result, "returncode", 1) == 0
 
     def rm_file(self, engine: str, container: str, path: str) -> None:
-        self._run([engine, "exec", container, "rm", "-f", path], check=False)
+        self._run([engine, "exec", container, "rm", "-f", path],
+                  capture_output=True, text=True, check=False)
 
     def exec_interactive(self, engine: str, container: str, shells: tuple[str, ...] = ("sh", "bash")) -> int:
         """Attempt an interactive exec shell, trying each entry in `shells`
