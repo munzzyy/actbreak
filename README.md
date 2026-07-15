@@ -4,11 +4,13 @@
 [![License: Prosperity 3.0.0](https://img.shields.io/badge/license-Prosperity--3.0.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 
-A local breakpoint debugger for [`act`](https://github.com/nektos/act). `act` runs
-GitHub Actions workflows locally, but there's no way to pause mid-run and look
-around. actbreak injects a real breakpoint into a workflow, waits for the job
-container to reach it, and drops you into a live shell inside the still-running
-container. Resume when you're done, and the workflow keeps going.
+actbreak is a local breakpoint debugger for GitHub Actions: pause a workflow mid-step
+and get a real shell inside the still-running job container.
+
+Built on [`act`](https://github.com/nektos/act), which runs GitHub Actions workflows
+locally but has no way to pause mid-run on its own. actbreak injects the breakpoint,
+waits for the job container to reach it, execs you in, and resumes the run when you're
+done.
 
 Zero runtime dependencies. Python 3.9+, stdlib only.
 
