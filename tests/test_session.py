@@ -388,6 +388,74 @@ class CmdRunCleanupTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["container_name"], "act-CI-build")
 
+    def test_clean_completion_reaps_the_reuse_container(self):
+        # Breakpoint hit, attached, resumed, job runs to the end. --reuse
+        # left the container behind; a clean run must reap it, not leak it.
+        popen = FakePopen(running=True, exit_code=0)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout=ONE_MATCH_PS), "test -f": FakeResult(returncode=0)}
+        )
+
+        def fake_wait(*a, **kw):
+            return Container(id="c1", name="act-CI-build")
+
+        patchers = self._patched(popen, fake_run, fake_wait)
+        with _patch_all(patchers):
+            args = _run_args(workflow=str(self.workflow))
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 0)
+        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertTrue(
+            container_rm, f"a clean run must reap the --reuse container, got: {fake_run.calls}"
+        )
+        self.assertIn("act-CI-build", container_rm[0])
+
+    def test_break_on_failure_success_reaps_container_without_a_job_flag(self):
+        # The exact command from the field report: `actbreak run ci.yml
+        # --break-on-failure` with no -j. The job passes, so no post-mortem
+        # fires -- the reuse container still has to be reaped by workflow name.
+        popen = FakePopen(running=False, exit_code=0)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow),
+                break_before=None,
+                break_on_failure=True,
+                job=None,
+            )
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 0)
+        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertTrue(
+            container_rm, f"a passing --break-on-failure run must reap the container, got: {fake_run.calls}"
+        )
+        self.assertIn("act-CI-build", container_rm[0])
+
+    def test_no_attach_hold_does_not_reap_the_container(self):
+        # Regression guard: the intentionally-held --no-attach container must
+        # survive so `actbreak resume` can still reach it.
+        popen = FakePopen(running=True)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout=ONE_MATCH_PS), "test -f": FakeResult(returncode=0)}
+        )
+
+        def fake_wait(*a, **kw):
+            return Container(id="c1", name="act-CI-build")
+
+        state_dir = Path(self.tmp.name) / ".actbreak-hold"
+        patchers = self._patched(popen, fake_run, fake_wait) + (
+            mock.patch.object(session, "STATE_DIR", state_dir),
+            mock.patch.object(session, "STATE_FILE", state_dir / "state.json"),
+        )
+        with _patch_all(patchers):
+            args = _run_args(workflow=str(self.workflow), no_attach=True)
+            session.cmd_run(args)
+        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertFalse(
+            container_rm, f"a held --no-attach container must not be reaped, got: {fake_run.calls}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # cmd_resume

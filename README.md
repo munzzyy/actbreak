@@ -100,6 +100,18 @@ actbreak run ci.yml --break-on-failure
 6. Execs an interactive shell into the container. Exiting the shell (or
    running `actbreak resume`) deletes the sentinel and lets the job continue.
 
+## Limitations
+
+- The breakpoint step needs a real shell in the job container: it runs `sh`
+  with `mkdir`, `printf`, and `sleep`. A `scratch` or distroless image without
+  those won't hold at the breakpoint.
+- `act --reuse` keeps the job container alive so you can attach to it. actbreak
+  reaps that container once the run finishes cleanly (resumed to the end, the
+  breakpoint never hit, or a `--break-on-failure` run that passed), so a normal
+  run doesn't leave a stopped container behind. The one it keeps on purpose is
+  `--no-attach`, which parks the container for `actbreak resume` to pick up
+  later — clear those with `actbreak clean`.
+
 ### Why not just parse the YAML?
 
 Because round-tripping a workflow through a generic YAML library corrupts it.

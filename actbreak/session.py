@@ -166,6 +166,39 @@ def _terminate_act_and_container(
         pass
 
 
+def _reap_finished_container(
+    runner: CommandRunner, engine: str, job_name: str | None, workflow_hint: str | None
+) -> None:
+    """Remove the job container `act --reuse` leaves behind after a clean run.
+
+    actbreak passes --reuse so the container survives while the job is paused
+    at the injected hold, which is the whole point -- you attach to it. But
+    once the job has run to completion there is nothing left to attach to, and
+    without this a normal run would leak a stopped act container every time.
+    Only the intentionally-held paths keep their container: --no-attach returns
+    before reaching here, and a failed --break-on-failure run hands off to the
+    post-mortem, which owns that container's lifecycle instead.
+
+    Best-effort. It only removes a container it can identify unambiguously (a
+    single match), so it never guesses and reaps the wrong one, and a container
+    that's already gone or an engine hiccup won't fail an otherwise-clean run."""
+    try:
+        containers = runner.ps(engine, all_containers=True)
+        if job_name:
+            candidates = [find_job_container(containers, job_name, workflow_hint)]
+        else:
+            act_containers = [c for c in containers if c.name.lower().startswith("act-")]
+            if workflow_hint:
+                nwf = normalize_name(workflow_hint)
+                candidates = [c for c in act_containers if nwf in normalize_name(c.name)] or act_containers
+            else:
+                candidates = act_containers
+        if len(candidates) == 1:
+            runner.rm_container(engine, candidates[0].name)
+    except (ContainerNotFoundError, ActbreakError):
+        pass
+
+
 def wait_for_breakpoint(
     proc: subprocess.Popen,
     runner: CommandRunner,
@@ -315,6 +348,11 @@ def cmd_run(args) -> int:
 
         if args.break_on_failure and exit_code != 0:
             exit_code = _post_mortem(runner, engine, job_name, workflow_hint, args.no_attach, exit_code)
+        else:
+            # The job ran to completion (resumed through the hold, never hit
+            # it, or a --break-on-failure run that passed). --reuse left its
+            # container behind; reap it so a clean run doesn't leak one.
+            _reap_finished_container(runner, engine, job_name, workflow_hint)
 
         return exit_code
     except _Interrupted:
