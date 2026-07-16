@@ -1,6 +1,7 @@
 # actbreak
 
 [![CI](https://github.com/munzzyy/actbreak/actions/workflows/ci.yml/badge.svg)](https://github.com/munzzyy/actbreak/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/actbreak)](https://pypi.org/project/actbreak/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 
@@ -16,19 +17,23 @@ Zero runtime dependencies. Python 3.9+, stdlib only.
 
 ## Status
 
-Early / v0.1.0. Core injection and selection logic is unit tested; the
+Early / v0.2.0. Core injection and selection logic is unit tested; the
 run/resume/clean orchestration against real `act` + Docker/Podman is covered by
 a CI integration test rather than exercised in every environment this ships to.
 
 ## Install
 
 ```
+pipx install actbreak
+```
+
+Or from a clone, since it's stdlib-only:
+
+```
 git clone https://github.com/munzzyy/actbreak
 cd actbreak
 pip install -e .
 ```
-
-Once it's on PyPI: `pipx install actbreak`.
 
 Requires `act` on PATH, and one of Docker or Podman.
 
@@ -137,3 +142,7 @@ PATH, which in practice means it only runs in CI.
 ## License
 
 MIT — free to use, change, and ship, commercial or not. See [LICENSE](LICENSE).
+
+## Support
+
+If actbreak saved you a round of push-and-pray debugging, [sponsoring](https://github.com/sponsors/munzzyy) is what keeps it maintained.
