@@ -46,6 +46,8 @@ actbreak run <workflow.yml> --break-on-failure
 
 actbreak resume
 actbreak clean
+
+actbreak init-vscode
 ```
 
 `<workflow.yml>` is either a path to a workflow file, or a bare name looked up
@@ -66,6 +68,25 @@ by zero-based position (use this for steps with no `name:`).
 | `--no-attach` | don't exec a shell automatically; print the attach command and hold |
 | `--act-arg ARG` | extra argument passed through to `act` (repeatable) |
 | `-v`, `--verbose` | print the injection/act commands being run |
+
+### VS Code tasks
+
+```
+actbreak init-vscode
+```
+
+Scans every `.github/workflows/*.yml` (and `.yaml`) and writes one VS Code
+task per step: `actbreak: <workflow> / <job> / <step>`, each running the real
+`actbreak run <workflow> --break-before "<job>:<index>"` command in the
+integrated terminal. Instead of typing the step selector by hand, open the
+command palette (`Cmd/Ctrl+Shift+P` → "Tasks: Run Task") and pick the step.
+
+Reruns are idempotent: a second `init-vscode` replaces only the tasks it
+generated last time (matched by the `actbreak: ` label prefix) and leaves
+every other task in `.vscode/tasks.json` untouched. If that file already has
+`//` comments or a trailing comma (both legal in VS Code's own format, not in
+plain JSON), it's left alone entirely and the generated tasks go to
+`.vscode/actbreak-tasks.json` instead, for you to merge in by hand.
 
 ### Shell completions
 

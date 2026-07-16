@@ -84,7 +84,7 @@ class ParserTests(unittest.TestCase):
     def test_completions_bash_covers_parser(self):
         out = self._completions("bash")
         self.assertIn("_actbreak() {", out)
-        for token in ("run", "resume", "clean", "--version", "--completions",
+        for token in ("run", "resume", "clean", "init-vscode", "--version", "--completions",
                       "--break-before", "--break-after", "--break-on-failure",
                       "--job", "--runtime", "--no-attach", "--act-arg",
                       "-v", "--verbose"):
@@ -93,7 +93,7 @@ class ParserTests(unittest.TestCase):
     def test_completions_zsh_covers_parser(self):
         out = self._completions("zsh")
         self.assertIn("#compdef actbreak", out)
-        for token in ('"run"', '"resume"', '"clean"', '"--version"',
+        for token in ('"run"', '"resume"', '"clean"', '"init-vscode"', '"--version"',
                       '"--completions"', '"--break-before"', '"--break-after"',
                       '"--break-on-failure"', '"--job"', '"--runtime"',
                       '"--no-attach"', '"--act-arg"', '"-v"', '"--verbose"'):
@@ -108,6 +108,10 @@ class ParserTests(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["resume"]).command, "resume")
         self.assertEqual(parser.parse_args(["clean"]).command, "clean")
+
+    def test_init_vscode_takes_no_positional_args(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["init-vscode"]).command, "init-vscode")
 
 
 class MainDispatchTests(unittest.TestCase):
@@ -126,6 +130,12 @@ class MainDispatchTests(unittest.TestCase):
     def test_main_dispatches_clean(self):
         with mock.patch("actbreak.session.cmd_clean", return_value=0) as fake:
             rc = main(["clean"])
+        self.assertEqual(rc, 0)
+        fake.assert_called_once()
+
+    def test_main_dispatches_init_vscode(self):
+        with mock.patch("actbreak.vscode_tasks.cmd_init_vscode", return_value=0) as fake:
+            rc = main(["init-vscode"])
         self.assertEqual(rc, 0)
         fake.assert_called_once()
 

@@ -18,6 +18,7 @@ examples:
   actbreak run ci.yml --break-on-failure
   actbreak resume
   actbreak clean
+  actbreak init-vscode
 
 step selectors:
   a step name (matched against the step's `name:` in the workflow), or
@@ -111,6 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("resume", help="release an active breakpoint hold")
     sub.add_parser("clean", help="kill leftover held containers and temp dirs")
 
+    sub.add_parser(
+        "init-vscode",
+        help="generate a VS Code task per (workflow, job, step) under .github/workflows/",
+        description=(
+            "Write .vscode/tasks.json with one task per step, each running the real "
+            "`actbreak run --break-before <job>:<index>` command for it."
+        ),
+    )
+
     return parser
 
 
@@ -135,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
             return session.cmd_resume(args)
         if args.command == "clean":
             return session.cmd_clean(args)
+        if args.command == "init-vscode":
+            from . import vscode_tasks
+
+            return vscode_tasks.cmd_init_vscode(args)
         parser.error(f"unknown command: {args.command}")
         return 2  # unreachable, parser.error exits
     except ActbreakError as e:

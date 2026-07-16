@@ -38,3 +38,7 @@ class AmbiguousContainerError(ContainerNotFoundError):
 
 class SessionError(ActbreakError):
     """A resume/clean operation failed against the on-disk session state."""
+
+
+class VscodeTasksError(ActbreakError):
+    """`init-vscode` could not find or generate anything to write."""
