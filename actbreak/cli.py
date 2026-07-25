@@ -18,6 +18,7 @@ examples:
   actbreak run ci.yml --break-on-failure
   actbreak resume
   actbreak clean
+  actbreak list
   actbreak init-vscode
 
 step selectors:
@@ -111,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("resume", help="release an active breakpoint hold")
     sub.add_parser("clean", help="kill leftover held containers and temp dirs")
+    sub.add_parser(
+        "list",
+        help="show parked debug sessions and each one's container status",
+        description=(
+            "List the debug sessions left parked by 'run --no-attach' (or a "
+            "resume/clean that couldn't finish), with each one's live container "
+            "status (running, stopped, or gone) so you can see what's still held "
+            "and reap orphans."
+        ),
+    )
 
     sub.add_parser(
         "init-vscode",
@@ -145,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
             return session.cmd_resume(args)
         if args.command == "clean":
             return session.cmd_clean(args)
+        if args.command == "list":
+            return session.cmd_list(args)
         if args.command == "init-vscode":
             from . import vscode_tasks
 

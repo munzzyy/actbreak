@@ -46,6 +46,7 @@ actbreak run <workflow.yml> --break-on-failure
 
 actbreak resume
 actbreak clean
+actbreak list
 
 actbreak init-vscode
 ```
@@ -68,6 +69,25 @@ by zero-based position (use this for steps with no `name:`).
 | `--no-attach` | don't exec a shell automatically; print the attach command and hold |
 | `--act-arg ARG` | extra argument passed through to `act` (repeatable) |
 | `-v`, `--verbose` | print the injection/act commands being run |
+
+### Parked sessions
+
+```
+actbreak list
+```
+
+Shows the debug sessions a `run --no-attach` (or a `resume`/`clean` that
+couldn't finish) left parked, one per line, with each one's live container
+status read from `docker ps` / `podman ps`:
+
+```
+actbreak: 2 parked debug sessions:
+  act-CI-build [running] -- job 'build', step 'Run tests' (before) -- /repo/.github/workflows/ci.yml
+  act-CI-test [gone] -- job 'test', step 'Build' (after) -- /repo/.github/workflows/ci.yml
+```
+
+`running` is still held and attachable; `stopped` and `gone` are orphans to
+clear with `actbreak clean`. With nothing parked it just says so.
 
 ### VS Code tasks
 

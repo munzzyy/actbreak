@@ -113,6 +113,14 @@ class ParserTests(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["init-vscode"]).command, "init-vscode")
 
+    def test_list_takes_no_positional_args(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["list"]).command, "list")
+
+    def test_completions_cover_the_list_command(self):
+        self.assertIn("list", self._completions("bash"))
+        self.assertIn('"list"', self._completions("zsh"))
+
 
 class MainDispatchTests(unittest.TestCase):
     def test_main_dispatches_run_to_session(self):
@@ -130,6 +138,12 @@ class MainDispatchTests(unittest.TestCase):
     def test_main_dispatches_clean(self):
         with mock.patch("actbreak.session.cmd_clean", return_value=0) as fake:
             rc = main(["clean"])
+        self.assertEqual(rc, 0)
+        fake.assert_called_once()
+
+    def test_main_dispatches_list(self):
+        with mock.patch("actbreak.session.cmd_list", return_value=0) as fake:
+            rc = main(["list"])
         self.assertEqual(rc, 0)
         fake.assert_called_once()
 

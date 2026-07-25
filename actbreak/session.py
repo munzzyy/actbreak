@@ -484,3 +484,55 @@ def cmd_clean(args) -> int:
                 runner.rm_container(engine, c.id)
                 print(f"actbreak: cleaned stray container {c.name}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+
+def _container_status(runner: CommandRunner, engine: str, container_id: str, cache: dict) -> str:
+    """Report a recorded session's container as 'running', 'stopped', or 'gone'
+    using the same `ps -a` listing the rest of the tool tracks containers by
+    (id match, then the 'Up ...' status prefix, exactly as _wait_and_reap
+    reads it). `cache` memoizes the per-engine listing so a batch of sessions
+    on one runtime only lists once. A missing/broken runtime -- e.g. the state
+    file names podman but it's since been uninstalled -- yields 'unknown'
+    rather than crashing the whole listing."""
+    if engine not in cache:
+        try:
+            cache[engine] = runner.ps(engine, all_containers=True)
+        except Exception:  # defensive: a missing/broken runtime shouldn't sink the list
+            cache[engine] = None
+    containers = cache[engine]
+    if containers is None:
+        return "unknown"
+    match = next((c for c in containers if c.id == container_id), None)
+    if match is None:
+        return "gone"
+    return "running" if match.status.lower().startswith("up") else "stopped"
+
+
+def cmd_list(args) -> int:
+    """Show the debug sessions parked by `run --no-attach` (or a resume/clean
+    that couldn't finish), each annotated with its live container status so you
+    can see which breakpoints are still held and which are orphans to reap."""
+    sessions = _load_sessions()
+    if not sessions:
+        print("actbreak: no parked debug sessions")
+        return 0
+
+    runner = CommandRunner()
+    status_cache: dict = {}
+    noun = "session" if len(sessions) == 1 else "sessions"
+    print(f"actbreak: {len(sessions)} parked debug {noun}:")
+    for s in sessions:
+        engine = s.get("runtime", "")
+        status = _container_status(runner, engine, s.get("container_id", ""), status_cache)
+        name = s.get("container_name") or s.get("container_id") or "?"
+        job = s.get("job") or "?"
+        label = s.get("label") or "?"
+        position = s.get("position") or "?"
+        workflow = s.get("workflow") or "?"
+        print(f"  {name} [{status}] -- job '{job}', step '{label}' ({position}) -- {workflow}")
+    return 0

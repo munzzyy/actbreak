@@ -657,5 +657,122 @@ class CmdResumeTests(unittest.TestCase):
         self.assertNotIn("cleaned", buf.getvalue())
 
 
+# ---------------------------------------------------------------------------
+# cmd_list
+# ---------------------------------------------------------------------------
+
+
+class CmdListTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_dir = Path(self.tmp.name) / ".actbreak"
+        self.state_file = self.state_dir / "state.json"
+        self._patchers = [
+            mock.patch.object(session, "STATE_DIR", self.state_dir),
+            mock.patch.object(session, "STATE_FILE", self.state_file),
+        ]
+        for p in self._patchers:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _seed(self, sessions):
+        session._save_sessions(sessions)
+
+    def _run_list(self, fake_run):
+        buf = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with contextlib.redirect_stdout(buf):
+                rc = session.cmd_list(None)
+        return rc, buf.getvalue()
+
+    def test_no_sessions_prints_a_clean_message_and_lists_nothing(self):
+        fake_run = FakeRunFn()
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("no parked debug sessions", out)
+        # Nothing to inspect means no container listing was ever run.
+        self.assertEqual(fake_run.calls, [])
+
+    def test_running_container_is_reported_running(self):
+        self._seed(
+            [
+                {
+                    "runtime": "docker",
+                    "container_id": "c1",
+                    "container_name": "act-CI-build",
+                    "job": "build",
+                    "label": "Run tests",
+                    "position": "before",
+                    "workflow": "/repo/.github/workflows/ci.yml",
+                    "tmpdir": None,
+                }
+            ]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("1 parked debug session:", out)
+        self.assertIn("act-CI-build [running]", out)
+        self.assertIn("job 'build', step 'Run tests' (before)", out)
+        self.assertIn("/repo/.github/workflows/ci.yml", out)
+
+    def test_stopped_container_is_reported_stopped(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0) 2 minutes ago\n")})
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("act-CI-build [stopped]", out)
+
+    def test_missing_container_is_reported_gone(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        # The listing has some other container, but not id c1 -- ours is gone.
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=NO_MATCH_PS)})
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("act-CI-build [gone]", out)
+
+    def test_broken_runtime_is_reported_unknown_not_a_crash(self):
+        # State names podman but it's since been uninstalled: ps raises
+        # FileNotFoundError. The list must degrade to 'unknown', not blow up.
+        self._seed(
+            [{"runtime": "podman", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn(raises={"podman": FileNotFoundError("no podman")})
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("act-CI-build [unknown]", out)
+
+    def test_multiple_sessions_on_one_runtime_only_list_containers_once(self):
+        self._seed(
+            [
+                {"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None},
+                {"runtime": "docker", "container_id": "c2", "container_name": "act-CI2-build", "tmpdir": None},
+            ]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=TWO_MATCH_PS)})
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("2 parked debug sessions:", out)
+        self.assertIn("act-CI-build [running]", out)
+        self.assertIn("act-CI2-build [running]", out)
+        ps_calls = [c for c in fake_run.calls if "ps" in c]
+        self.assertEqual(len(ps_calls), 1, f"the per-engine listing must be cached, got: {fake_run.calls}")
+
+    def test_list_never_removes_a_container(self):
+        # list is read-only -- it inspects status, it must never rm anything.
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\n")})
+        self._run_list(fake_run)
+        rm_calls = [c for c in fake_run.calls if "rm" in c]
+        self.assertEqual(rm_calls, [], f"list must not remove anything, got: {fake_run.calls}")
+
+
 if __name__ == "__main__":
     unittest.main()
