@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import injector
 from .errors import ActbreakError, AmbiguousContainerError, ContainerNotFoundError, SessionError
-from .runtime import CommandRunner, Container, detect_runtime, find_job_container, normalize_name, require_act
+from .runtime import CommandRunner, Container, detect_runtime, find_job_container, require_act
 from .selector import resolve_selector
 
 POLL_INTERVAL = 1.0
@@ -143,13 +143,35 @@ def _attach_command_str(engine: str, container_name: str, shell: str = "sh") -> 
     return " ".join(shlex.quote(p) for p in (engine, "exec", "-it", container_name, shell))
 
 
+def _match_run_containers(
+    containers: list[Container], job_name: str | None, jobs, workflow_hint: str | None
+) -> list[Container]:
+    """The containers that belong to THIS run, matched unambiguously by job
+    name (narrowed by the workflow): the one job when -j was given, otherwise
+    one per parsed job. Never falls back to "every act-* container", so it
+    can't touch an unrelated workflow's parked debug container, and it skips
+    any job whose container is absent or ambiguous -- cleanup never guesses."""
+    names = [job_name] if job_name else list(jobs or [])
+    matched: list[Container] = []
+    for name in names:
+        try:
+            container = find_job_container(containers, name, workflow_hint)
+        except ContainerNotFoundError:
+            # Not found for this job, or ambiguous (AmbiguousContainerError is
+            # a subclass) -- either way, don't guess.
+            continue
+        if container not in matched:
+            matched.append(container)
+    return matched
+
+
 def _terminate_act_and_container(
-    proc: subprocess.Popen, runner: CommandRunner, engine: str, job_name: str | None, workflow_hint: str | None
+    proc: subprocess.Popen, runner: CommandRunner, engine: str, job_name: str | None, jobs, workflow_hint: str | None
 ) -> None:
     """Best-effort cleanup for every cmd_run exit path that isn't leaving a
     supported, resumable session behind: kill `act` if it's still running
     (it was spawned start_new_session=True, so nothing else will ever reap
-    it) and remove its job container, if one was ever created. Shared by
+    it) and remove its job container(s), if any were created. Shared by
     the interrupted and the give-up-waiting (SessionError) paths."""
     if proc.poll() is None:
         proc.terminate()
@@ -159,17 +181,16 @@ def _terminate_act_and_container(
             proc.kill()
     try:
         containers = runner.ps(engine, all_containers=True)
-        container = find_job_container(containers, job_name, workflow_hint) if job_name else None
-        if container is not None:
+        for container in _match_run_containers(containers, job_name, jobs, workflow_hint):
             runner.rm_container(engine, container.name)
     except (ContainerNotFoundError, ActbreakError):
         pass
 
 
 def _reap_finished_container(
-    runner: CommandRunner, engine: str, job_name: str | None, workflow_hint: str | None
+    runner: CommandRunner, engine: str, job_name: str | None, jobs, workflow_hint: str | None
 ) -> None:
-    """Remove the job container `act --reuse` leaves behind after a clean run.
+    """Remove the job container(s) `act --reuse` leaves behind after a clean run.
 
     actbreak passes --reuse so the container survives while the job is paused
     at the injected hold, which is the whole point -- you attach to it. But
@@ -179,22 +200,15 @@ def _reap_finished_container(
     before reaching here, and a failed --break-on-failure run hands off to the
     post-mortem, which owns that container's lifecycle instead.
 
-    Best-effort. It only removes a container it can identify unambiguously (a
-    single match), so it never guesses and reaps the wrong one, and a container
-    that's already gone or an engine hiccup won't fail an otherwise-clean run."""
+    Best-effort. It only removes containers it can identify unambiguously (per
+    job, by name), so it never guesses and reaps the wrong one, and a container
+    that's already gone or an engine hiccup won't fail an otherwise-clean run.
+    A passing --break-on-failure run has no -j, so it reaps one container per
+    parsed job rather than stopping at a single global match."""
     try:
         containers = runner.ps(engine, all_containers=True)
-        if job_name:
-            candidates = [find_job_container(containers, job_name, workflow_hint)]
-        else:
-            act_containers = [c for c in containers if c.name.lower().startswith("act-")]
-            if workflow_hint:
-                nwf = normalize_name(workflow_hint)
-                candidates = [c for c in act_containers if nwf in normalize_name(c.name)] or act_containers
-            else:
-                candidates = act_containers
-        if len(candidates) == 1:
-            runner.rm_container(engine, candidates[0].name)
+        for container in _match_run_containers(containers, job_name, jobs, workflow_hint):
+            runner.rm_container(engine, container.name)
     except (ContainerNotFoundError, ActbreakError):
         pass
 
@@ -236,27 +250,18 @@ def wait_for_breakpoint(
 
 
 def _post_mortem(
-    runner: CommandRunner, engine: str, job_name: str | None, workflow_hint: str | None, no_attach: bool, exit_code: int
+    runner: CommandRunner, engine: str, job_name: str | None, jobs, workflow_hint: str | None, no_attach: bool, exit_code: int
 ) -> int:
     print(f"actbreak: act exited {exit_code}; looking for the job container for post-mortem", file=sys.stderr)
     containers = runner.ps(engine, all_containers=True)
-    act_containers = [c for c in containers if c.name.lower().startswith("act-")]
-    if job_name:
-        try:
-            container = find_job_container(containers, job_name, workflow_hint)
-        except ContainerNotFoundError as e:
-            print(f"actbreak: {e}", file=sys.stderr)
-            return exit_code
-        candidates = [container]
-    else:
-        if workflow_hint:
-            nwf = normalize_name(workflow_hint)
-            candidates = [c for c in act_containers if nwf in normalize_name(c.name)] or act_containers
-        else:
-            candidates = act_containers
-        if not candidates:
-            print("actbreak: no act container found for post-mortem", file=sys.stderr)
-            return exit_code
+    candidates = _match_run_containers(containers, job_name, jobs, workflow_hint)
+    if not candidates:
+        # No container for this run's own job(s). Never fall back to some
+        # other act-* container -- attaching to (and later force-removing)
+        # an unrelated workflow's parked debug session would destroy it and
+        # give a confidently wrong post-mortem.
+        print("actbreak: no act container found for this run's workflow for post-mortem", file=sys.stderr)
+        return exit_code
 
     if len(candidates) > 1:
         print("actbreak: multiple job containers are still alive; attach manually:", file=sys.stderr)
@@ -347,17 +352,17 @@ def cmd_run(args) -> int:
             exit_code = proc.wait()
 
         if args.break_on_failure and exit_code != 0:
-            exit_code = _post_mortem(runner, engine, job_name, workflow_hint, args.no_attach, exit_code)
+            exit_code = _post_mortem(runner, engine, job_name, jobs, workflow_hint, args.no_attach, exit_code)
         else:
             # The job ran to completion (resumed through the hold, never hit
             # it, or a --break-on-failure run that passed). --reuse left its
             # container behind; reap it so a clean run doesn't leak one.
-            _reap_finished_container(runner, engine, job_name, workflow_hint)
+            _reap_finished_container(runner, engine, job_name, jobs, workflow_hint)
 
         return exit_code
     except _Interrupted:
         print("\nactbreak: interrupted, cleaning up", file=sys.stderr)
-        _terminate_act_and_container(proc, runner, engine, job_name, workflow_hint)
+        _terminate_act_and_container(proc, runner, engine, job_name, jobs, workflow_hint)
         return 130
     except SessionError:
         # wait_for_breakpoint gave up (timed out, or an ambiguous container
@@ -368,7 +373,7 @@ def cmd_run(args) -> int:
         # ever recorded for `actbreak resume` to find. Clean up, then let
         # the SessionError keep propagating so the user still sees why.
         print("actbreak: giving up, cleaning up", file=sys.stderr)
-        _terminate_act_and_container(proc, runner, engine, job_name, workflow_hint)
+        _terminate_act_and_container(proc, runner, engine, job_name, jobs, workflow_hint)
         raise
     finally:
         signal.signal(signal.SIGINT, old_int)
@@ -382,6 +387,29 @@ def cmd_run(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _wait_and_reap(runner: CommandRunner, engine: str, container_id: str, timeout: float = DEFAULT_TIMEOUT) -> bool:
+    """After `resume` drops the hold, the job runs to the end and
+    `act --reuse` leaves its container stopped. Poll until it's no longer
+    running, then remove it by id -- rm by id works on a stopped container,
+    unlike the exec probe `clean`'s sweep uses. Returns True once it's gone,
+    False if it's still running when `timeout` elapses (the caller then keeps
+    the session so `clean` can reap it by id later)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            containers = runner.ps(engine, all_containers=True)
+        except ActbreakError:
+            return False
+        match = next((c for c in containers if c.id == container_id), None)
+        if match is None:
+            return True  # act already removed it
+        if not match.status.lower().startswith("up"):
+            return runner.rm_container(engine, container_id)
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(POLL_INTERVAL)
+
+
 def cmd_resume(args) -> int:
     sessions = _load_sessions()
     if not sessions:
@@ -392,8 +420,7 @@ def cmd_resume(args) -> int:
     unresolved = []
     for s in sessions:
         try:
-            runner.rm_file(s["runtime"], s["container_id"], "/tmp/actbreak/hold")
-            print(f"actbreak: resumed {s['container_name']}")
+            removed = runner.rm_file(s["runtime"], s["container_id"], "/tmp/actbreak/hold")
         except Exception as e:  # defensive: a bad/stale session entry shouldn't block the rest
             ok = False
             print(f"actbreak: failed to resume {s.get('container_name', '?')}: {e}", file=sys.stderr)
@@ -402,7 +429,27 @@ def cmd_resume(args) -> int:
             # through `clean`'s stray-container sweep.
             unresolved.append(s)
             continue
-        _cleanup_tmpdir(s.get("tmpdir"))
+        if not removed:
+            # The hold couldn't be removed: the container isn't running (e.g.
+            # it stopped across a reboot), so there's nothing to resume into.
+            # Keep the record -- `clean` reaps it by id -- instead of falsely
+            # reporting success and dropping it into an unrecoverable orphan.
+            ok = False
+            print(
+                f"actbreak: could not resume {s.get('container_name', '?')}: its container "
+                "isn't running. Run 'actbreak clean' to remove it.",
+                file=sys.stderr,
+            )
+            unresolved.append(s)
+            continue
+        print(f"actbreak: resumed {s['container_name']}")
+        # The job now runs to completion and `act --reuse` leaves the container
+        # stopped; wait for it and reap it so resume doesn't leak one. If it
+        # outlives the wait, keep the record so `clean` can still get it.
+        if _wait_and_reap(runner, s["runtime"], s["container_id"]):
+            _cleanup_tmpdir(s.get("tmpdir"))
+        else:
+            unresolved.append(s)
     _save_sessions(unresolved)
     return 0 if ok else 1
 
@@ -412,8 +459,10 @@ def cmd_clean(args) -> int:
     runner = CommandRunner()
     for s in sessions:
         try:
-            runner.rm_container(s["runtime"], s["container_id"])
-            print(f"actbreak: cleaned {s.get('container_name', s['container_id'])}")
+            if runner.rm_container(s["runtime"], s["container_id"]):
+                print(f"actbreak: cleaned {s.get('container_name', s['container_id'])}")
+            else:
+                print(f"actbreak: failed to clean {s.get('container_name', '?')}", file=sys.stderr)
         except Exception as e:  # defensive
             print(f"actbreak: failed to clean {s.get('container_name', '?')}: {e}", file=sys.stderr)
         _cleanup_tmpdir(s.get("tmpdir"))

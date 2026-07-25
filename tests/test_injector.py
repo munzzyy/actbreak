@@ -388,5 +388,44 @@ class InjectorGoldenTests(unittest.TestCase):
         self.assertEqual("".join(result), expected)
 
 
+class InvisibleLineBreakTests(unittest.TestCase):
+    """A workflow carrying an invisible line separator (NEL/LS/PS, almost
+    always an accidental paste) splits differently under Python's splitlines
+    than under act's YAML parser, so actbreak could scan a different step
+    list than act runs. parse_workflow must reject it loudly, naming the
+    character and line, instead of silently mis-scanning the steps."""
+
+    def _parse(self, text):
+        return injector.parse_workflow(text.splitlines(keepends=True))
+
+    def test_line_separator_u2028_is_rejected_by_name_and_line(self):
+        # LS spliced inside a quoted step name -- splitlines breaks on it and
+        # the step list no longer matches the file act would run.
+        text = (
+            "name: CI\non: push\njobs:\n  build:\n    steps:\n"
+            "      - name: \"Run" + chr(0x2028) + "tests\"\n        run: echo hi\n"
+        )
+        with self.assertRaises(InjectionError) as ctx:
+            self._parse(text)
+        self.assertIn("U+2028", str(ctx.exception))
+
+    def test_paragraph_separator_u2029_is_rejected(self):
+        text = "name: CI\non: push\njobs:\n  build:\n    steps:\n      - run: a" + chr(0x2029) + "b\n"
+        with self.assertRaises(InjectionError) as ctx:
+            self._parse(text)
+        self.assertIn("U+2029", str(ctx.exception))
+
+    def test_next_line_u0085_is_rejected(self):
+        text = "name: CI\non: push\njobs:\n  build:\n    steps:\n      - run: a" + chr(0x85) + "b\n"
+        with self.assertRaises(InjectionError) as ctx:
+            self._parse(text)
+        self.assertIn("U+0085", str(ctx.exception))
+
+    def test_ordinary_workflow_is_unaffected(self):
+        text = "name: CI\non: push\njobs:\n  build:\n    steps:\n      - run: echo hi\n"
+        jobs = self._parse(text)
+        self.assertIn("build", jobs)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,32 @@ def _is_blank_or_comment(line: str) -> bool:
     return content == "" or content.startswith("#")
 
 
+_INVISIBLE_LINE_BREAKS = {
+    # keys are chr() so this source stays pure ASCII, not literal invisibles
+    chr(0x85): "U+0085 (next line)",
+    chr(0x2028): "U+2028 (line separator)",
+    chr(0x2029): "U+2029 (paragraph separator)",
+}
+
+
+def _check_no_invisible_breaks(lines: list[str]) -> None:
+    # Python's str.splitlines() treats NEL/LS/PS as line breaks; a text editor
+    # and act's YAML parser mostly don't. A workflow carrying one of these
+    # (almost always an accidental paste) would split into a different set of
+    # steps here than the file act actually runs -- so the selector could miss
+    # a step that plainly exists. Fail loud, naming the character and line,
+    # instead of scanning a silently-mangled step list.
+    real_line = 1
+    for line in lines:
+        for ch, desc in _INVISIBLE_LINE_BREAKS.items():
+            if ch in line:
+                raise InjectionError(
+                    f"line {real_line}: workflow contains an invisible line separator "
+                    f"{desc}; remove it (it's almost always an accidental paste)"
+                )
+        real_line += line.count("\n")
+
+
 def _check_no_tabs(lines: list[str]) -> None:
     # A tab inside a literal/folded block scalar (`run: |`, most often) is
     # DATA -- a Makefile recipe line, for example -- not YAML structural
@@ -318,6 +344,7 @@ def parse_workflow(lines: list[str]) -> dict[str, JobInfo]:
     """Parse the structural skeleton of a workflow file (job blocks and their
     steps) without ever building a full YAML document. Raises InjectionError
     on anything we can't confidently scan."""
+    _check_no_invisible_breaks(lines)
     _check_no_tabs(lines)
 
     jobs_line = None

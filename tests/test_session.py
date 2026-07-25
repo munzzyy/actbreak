@@ -7,6 +7,7 @@ covered separately by tests/test_integration.py."""
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import shutil
 import subprocess
@@ -432,6 +433,99 @@ class CmdRunCleanupTests(unittest.TestCase):
         )
         self.assertIn("act-CI-build", container_rm[0])
 
+    def test_break_on_failure_reap_never_touches_an_unrelated_container(self):
+        # Field report: a parked debug container from ANOTHER workflow
+        # (act-Other-Workflow-otherjob) must never be reaped by a passing
+        # `--break-on-failure` run whose own job produced no container.
+        popen = FakePopen(running=False, exit_code=0)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="cx\tact-Other-Workflow-otherjob\tExited (0)\n")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow), break_before=None, break_on_failure=True, job=None
+            )
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 0)
+        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertFalse(
+            container_rm, f"an unrelated workflow's container must not be reaped, got: {fake_run.calls}"
+        )
+
+    def test_break_on_failure_postmortem_never_attaches_to_an_unrelated_container(self):
+        # The nastier half: act FAILS, and the only act-* container around is
+        # someone else's parked debug session. The post-mortem must not exec
+        # into or force-remove it, and must not present it as this run's.
+        popen = FakePopen(running=False, exit_code=1)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="cx\tact-Other-Workflow-otherjob\tExited (1)\n")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow), break_before=None, break_on_failure=True, job=None
+            )
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 1)
+        attach = [c for c in fake_run.calls if "-it" in c]
+        rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertFalse(attach, f"post-mortem must not exec into an unrelated container, got: {fake_run.calls}")
+        self.assertFalse(rm, f"post-mortem must not remove an unrelated container, got: {fake_run.calls}")
+
+    def test_passing_break_on_failure_reaps_every_job_container_in_a_multijob_workflow(self):
+        # README promises a passing --break-on-failure run leaves nothing
+        # behind. With two jobs, --reuse leaves TWO containers; both must be
+        # reaped, not just a single global match.
+        two = self.repo_root / ".github" / "workflows" / "two.yml"
+        two.write_text(
+            "name: CI\non: push\njobs:\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - name: A\n        run: echo hi\n"
+            "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - name: B\n        run: echo hi\n"
+        )
+        popen = FakePopen(running=False, exit_code=0)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\nc2\tact-CI-test\tExited (0)\n")}
+        )
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers):
+            args = _run_args(workflow=str(two), break_before=None, break_on_failure=True, job=None)
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 0)
+        removed = {c[-1] for c in fake_run.calls if c[:2] == ["docker", "rm"]}
+        self.assertEqual(
+            removed, {"act-CI-build", "act-CI-test"},
+            f"both job containers must be reaped, got: {fake_run.calls}",
+        )
+
+    def test_interrupt_during_break_on_failure_reaps_the_container_without_a_job_flag(self):
+        # Ctrl+C during `--break-on-failure` (no -j): act is killed, and its
+        # container -- identified by workflow name, never a blind act-* grab --
+        # must be removed rather than left running.
+        class InterruptingPopen(FakePopen):
+            def __init__(self):
+                super().__init__(running=True, exit_code=0)
+                self._waits = 0
+
+            def wait(self, timeout=None):
+                self._waits += 1
+                if self._waits == 1:
+                    raise session._Interrupted()
+                self.running = False
+                return self.exit_code
+
+        popen = InterruptingPopen()
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\n")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow), break_before=None, break_on_failure=True, job=None
+            )
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 130)
+        self.assertTrue(popen.terminated, "act must be terminated on interrupt")
+        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertTrue(
+            container_rm, f"the interrupted run's container must be reaped, got: {fake_run.calls}"
+        )
+        self.assertIn("act-CI-build", container_rm[0])
+
     def test_no_attach_hold_does_not_reap_the_container(self):
         # Regression guard: the intentionally-held --no-attach container must
         # survive so `actbreak resume` can still reach it.
@@ -512,6 +606,55 @@ class CmdResumeTests(unittest.TestCase):
     def test_no_sessions_returns_1_without_touching_state_file(self):
         rc = session.cmd_resume(None)
         self.assertEqual(rc, 1)
+
+    def test_resume_reaps_the_finished_container_so_it_is_not_leaked(self):
+        # After the hold is dropped, the job runs to the end and --reuse leaves
+        # the container stopped. resume must reap it by id (which works on a
+        # stopped container), not just drop the record and orphan it.
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\n")},
+            default=FakeResult(returncode=0),
+        )
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertTrue(
+            container_rm, f"resume must reap the finished container, got: {fake_run.calls}"
+        )
+        self.assertIn("c1", container_rm[0])
+        self.assertEqual(session._load_sessions(), [])
+
+    def test_resume_against_a_stopped_container_keeps_the_session_and_fails(self):
+        # Post-reboot: the container is already stopped, so `exec rm` of the
+        # hold fails (nonzero). resume must NOT report success and drop the
+        # record -- it must keep it (so `clean` can reap it by id) and exit 1.
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn({"exec": FakeResult(returncode=1)}, default=FakeResult(returncode=0))
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            rc = session.cmd_resume(None)
+        self.assertEqual(rc, 1)
+        remaining = session._load_sessions()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["container_id"], "c1")
+
+    def test_clean_does_not_report_cleaned_when_removal_fails(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn(default=FakeResult(returncode=1))
+        buf = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session.shutil, "which", return_value=None):
+                with contextlib.redirect_stdout(buf):
+                    rc = session.cmd_clean(None)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cleaned", buf.getvalue())
 
 
 if __name__ == "__main__":

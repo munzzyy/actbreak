@@ -221,6 +221,21 @@ class CommandRunnerTests(unittest.TestCase):
         runner.rm_container("podman", "c1")
         self.assertEqual(fake.calls[-1], ["podman", "rm", "-f", "c1"])
 
+    def test_rm_file_reports_success_and_failure_by_return_code(self):
+        # A stopped container makes `exec rm` exit nonzero; rm_file must report
+        # that so resume can tell a real resume from a no-op against a dead
+        # container instead of silently "succeeding".
+        ok = CommandRunner(run=FakeRunner(default=FakeResult(returncode=0)))
+        self.assertTrue(ok.rm_file("docker", "c1", "/tmp/actbreak/hold"))
+        fail = CommandRunner(run=FakeRunner(default=FakeResult(returncode=1)))
+        self.assertFalse(fail.rm_file("docker", "c1", "/tmp/actbreak/hold"))
+
+    def test_rm_container_reports_success_and_failure_by_return_code(self):
+        ok = CommandRunner(run=FakeRunner(default=FakeResult(returncode=0)))
+        self.assertTrue(ok.rm_container("docker", "c1"))
+        fail = CommandRunner(run=FakeRunner(default=FakeResult(returncode=1)))
+        self.assertFalse(fail.rm_container("docker", "c1"))
+
 
 if __name__ == "__main__":
     unittest.main()

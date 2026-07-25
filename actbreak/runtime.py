@@ -158,9 +158,15 @@ class CommandRunner:
                            capture_output=True, text=True, check=False)
         return getattr(result, "returncode", 1) == 0
 
-    def rm_file(self, engine: str, container: str, path: str) -> None:
-        self._run([engine, "exec", container, "rm", "-f", path],
-                  capture_output=True, text=True, check=False)
+    def rm_file(self, engine: str, container: str, path: str) -> bool:
+        # Returns whether the removal actually succeeded. `exec rm` fails
+        # (nonzero) when the container isn't running -- e.g. it stopped across
+        # a reboot -- and check=False means we'd never notice unless we read
+        # the return code. Callers (resume) rely on this to tell a real resume
+        # from a no-op against a dead container.
+        result = self._run([engine, "exec", container, "rm", "-f", path],
+                           capture_output=True, text=True, check=False)
+        return getattr(result, "returncode", 1) == 0
 
     def exec_interactive(self, engine: str, container: str, shells: tuple[str, ...] = ("sh", "bash")) -> int:
         """Attempt an interactive exec shell, trying each entry in `shells`
@@ -173,9 +179,12 @@ class CommandRunner:
                 return returncode
         return returncode
 
-    def rm_container(self, engine: str, container: str, force: bool = True) -> None:
+    def rm_container(self, engine: str, container: str, force: bool = True) -> bool:
+        # Returns whether the container was actually removed, so clean doesn't
+        # report success on a removal that failed.
         args = [engine, "rm"]
         if force:
             args.append("-f")
         args.append(container)
-        self._run(args, capture_output=True, text=True, check=False)
+        result = self._run(args, capture_output=True, text=True, check=False)
+        return getattr(result, "returncode", 1) == 0
