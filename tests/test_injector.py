@@ -327,6 +327,7 @@ class InjectorGoldenTests(unittest.TestCase):
             "      - name: Install deps\n"
             "        run: pip install -r requirements.txt\n"
             '      - name: "actbreak breakpoint (before \'Run tests\' in job \'build\')"\n'
+            "        if: always()\n"
             "        shell: sh\n"
             "        run: |\n"
             "          mkdir -p /tmp/actbreak\n"
@@ -354,6 +355,19 @@ class InjectorGoldenTests(unittest.TestCase):
             self.assertTrue(body == "" or body.startswith(" "), repr(ln))
         self.assertIn("step: Build and Test", "".join(lines))
 
+    def test_hold_step_always_runs_even_after_a_failed_step(self):
+        # A step after a failed one is skipped unless it carries `if:`. The
+        # hold has to survive that or --break-after on a failing step never
+        # fires, which is the case a debugger exists for.
+        for position in ("before", "after"):
+            for dash_indent in (0, 6, 10):
+                lines = injector.build_hold_lines("build", "Run tests", position, dash_indent, "\n")
+                key_indent = dash_indent + 2
+                self.assertIn(" " * key_indent + "if: always()\n", lines)
+                # It has to sit among the step's keys, not inside `run: |`.
+                self.assertLess(lines.index(" " * key_indent + "if: always()\n"),
+                                lines.index(" " * key_indent + "run: |\n"))
+
     def test_crlf_break_after_golden(self):
         text, lines, jobs, _ = load("crlf.yml")
         job, idx = resolve_selector(jobs, "Checkout")
@@ -370,6 +384,7 @@ class InjectorGoldenTests(unittest.TestCase):
             "      - name: Checkout\r\n"
             "        uses: actions/checkout@v4\r\n"
             '      - name: "actbreak breakpoint (after \'Checkout\' in job \'build\')"\r\n'
+            "        if: always()\r\n"
             "        shell: sh\r\n"
             "        run: |\r\n"
             "          mkdir -p /tmp/actbreak\r\n"

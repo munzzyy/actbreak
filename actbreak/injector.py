@@ -426,6 +426,11 @@ def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newl
         out.append(" " * indent + text + newline)
 
     emit(f"- name: {json.dumps(step_name)}", dash_indent)
+    # Without `if: always()` the runner skips every step after a failed one,
+    # so a breakpoint set after (or downstream of) a step that failed would
+    # never run -- exactly the moment you most want a shell in the container.
+    # A debugger should hold whether the job is passing or already broken.
+    emit("if: always()", key_indent)
     emit("shell: sh", key_indent)
     emit("run: |", key_indent)
 

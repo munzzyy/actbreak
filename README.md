@@ -62,7 +62,7 @@ by zero-based position (use this for steps with no `name:`).
 | Flag | Meaning |
 |---|---|
 | `--break-before STEP` | pause immediately before `STEP` runs |
-| `--break-after STEP` | pause immediately after `STEP` runs |
+| `--break-after STEP` | pause immediately after `STEP` runs, whether it passed or failed |
 | `--break-on-failure` | if `act` exits nonzero, attach to the last job container for post-mortem |
 | `--job JOB` | disambiguate a multi-job workflow |
 | `--runtime {docker,podman,auto}` | container runtime to use (default: auto-detect) |
@@ -138,7 +138,9 @@ actbreak run ci.yml --break-on-failure
    immediately before or after the target, using line-based text injection
    (never a YAML parse-and-re-serialize round trip; see below for why).
 3. The injected step drops a sentinel file (`/tmp/actbreak/hold`) and blocks
-   on it inside the container.
+   on it inside the container. It carries `if: always()`, so the breakpoint
+   still holds when an earlier step has already failed, which is the case
+   you most want a shell for.
 4. Runs `act -W <temp copy> --reuse` so the container stays alive after the
    run "finishes" (i.e. hangs at the hold).
 5. Polls `docker ps` / `podman ps` for the job's container, then for the
