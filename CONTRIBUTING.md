@@ -26,7 +26,7 @@ The `integration` marker runs a real `act` + Docker/Podman end-to-end test. It's
 ## What gets a change merged quickly
 
 - A fixture for anything you fix or add. If you found a workflow shape the injector mishandles, add it to `tests/fixtures/` with the expected output. A fix with no test can silently regress.
-- The injector stays line-based. Do not reach for a YAML library to "clean it up" — round-tripping corrupts real workflows (the `on:` key becomes boolean `True`, comments vanish), which is the whole reason the injector works the way it does.
+- The injector stays line-based. Do not reach for a YAML library to "clean it up". Round-tripping corrupts real workflows (the `on:` key becomes boolean `True`, comments vanish), which is the whole reason the injector works the way it does.
 
 ## License
 

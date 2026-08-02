@@ -1,7 +1,6 @@
 # actbreak
 
 [![CI](https://github.com/munzzyy/actbreak/actions/workflows/ci.yml/badge.svg)](https://github.com/munzzyy/actbreak/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/actbreak)](https://pypi.org/project/actbreak/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 
@@ -24,7 +23,7 @@ a CI integration test rather than exercised in every environment this ships to.
 ## Install
 
 ```
-pipx install actbreak
+pipx install git+https://github.com/munzzyy/actbreak
 ```
 
 Or from a clone, since it's stdlib-only:
@@ -34,6 +33,12 @@ git clone https://github.com/munzzyy/actbreak
 cd actbreak
 pip install -e .
 ```
+
+Don't install actbreak from PyPI yet. The listing there is stuck at 0.1.0,
+which predates `actbreak list`, `actbreak steps`, `init-vscode`, and shell
+completions, and it still carries the old Prosperity license instead of MIT.
+The 0.2.0 publish failed and hasn't been retried, so install from git until
+the PyPI page says 0.2.0.
 
 Requires `act` on PATH, and one of Docker or Podman.
 
@@ -183,7 +188,7 @@ actbreak run ci.yml --break-on-failure
   breakpoint never hit, or a `--break-on-failure` run that passed), so a normal
   run doesn't leave a stopped container behind. The one it keeps on purpose is
   `--no-attach`, which parks the container for `actbreak resume` to pick up
-  later — clear those with `actbreak clean`.
+  later; clear those with `actbreak clean`.
 
 ### Why not just parse the YAML?
 
@@ -209,7 +214,7 @@ PATH, which in practice means it only runs in CI.
 
 ## License
 
-MIT — free to use, change, and ship, commercial or not. See [LICENSE](LICENSE).
+MIT. Free to use, change, and ship, commercial or not. See [LICENSE](LICENSE).
 
 ## Support
 
