@@ -424,7 +424,7 @@ def cmd_resume(args) -> int:
     runner = CommandRunner()
     ok = True
     unresolved = []
-    for s in sessions:
+    for i, s in enumerate(sessions):
         try:
             removed = runner.rm_file(s["runtime"], s["container_id"], "/tmp/actbreak/hold")
         except Exception as e:  # defensive: a bad/stale session entry shouldn't block the rest
@@ -452,7 +452,27 @@ def cmd_resume(args) -> int:
         # The job now runs to completion and `act --reuse` leaves the container
         # stopped; wait for it and reap it so resume doesn't leak one. If it
         # outlives the wait, keep the record so `clean` can still get it.
-        if _wait_and_reap(runner, s["runtime"], s["container_id"]):
+        # Say that we're waiting: the rest of the workflow can take a while
+        # and without this the command just sits there looking hung.
+        print(
+            f"actbreak: waiting for {s['container_name']} to finish "
+            f"(Ctrl-C to leave it running; 'actbreak clean' reaps it later)"
+        )
+        try:
+            finished = _wait_and_reap(runner, s["runtime"], s["container_id"])
+        except KeyboardInterrupt:
+            # Ctrl-C means "stop watching", not "abort the job". Keep this
+            # session and every one still queued behind it so they stay
+            # resumable and cleanable.
+            print(
+                "\nactbreak: stopped waiting; the job is still running. "
+                "Run 'actbreak clean' once it's done.",
+                file=sys.stderr,
+            )
+            unresolved.extend(sessions[i:])
+            _save_sessions(unresolved)
+            return 0
+        if finished:
             _cleanup_tmpdir(s.get("tmpdir"))
         else:
             unresolved.append(s)

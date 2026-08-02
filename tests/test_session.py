@@ -646,6 +646,61 @@ class CmdResumeTests(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["container_id"], "c1")
 
+    def test_wait_and_reap_gives_up_on_a_container_that_never_stops(self):
+        # The wait is bounded so `resume` can't block forever on a job that
+        # hangs; giving up returns False and the caller keeps the session.
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 4 minutes\n")},
+            default=FakeResult(returncode=0),
+        )
+        runner = CommandRunner(run=fake_run)
+        with mock.patch.object(session, "POLL_INTERVAL", 0):
+            result = session._wait_and_reap(runner, "docker", "c1", timeout=0)
+        self.assertFalse(result)
+        self.assertEqual([c for c in fake_run.calls if c[:2] == ["docker", "rm"]], [])
+
+    def test_wait_and_reap_treats_an_already_removed_container_as_done(self):
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="")}, default=FakeResult(returncode=0))
+        runner = CommandRunner(run=fake_run)
+        with mock.patch.object(session, "POLL_INTERVAL", 0):
+            result = session._wait_and_reap(runner, "docker", "c1", timeout=0)
+        self.assertTrue(result)
+
+    def test_resume_says_it_is_waiting_before_it_blocks(self):
+        # Without this line the command prints "resumed X" and then sits
+        # silent for as long as the rest of the workflow takes, which reads
+        # as a hang.
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\n")},
+            default=FakeResult(returncode=0),
+        )
+        buf = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with contextlib.redirect_stdout(buf):
+                rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("waiting for act-CI-build to finish", out)
+        self.assertIn("Ctrl-C", out)
+
+    def test_ctrl_c_while_waiting_keeps_every_remaining_session(self):
+        # Ctrl-C means "stop watching", not "abort the job". The container is
+        # still running, so its record has to survive for `clean`.
+        first = {"runtime": "docker", "container_id": "c1", "container_name": "act-CI-a", "tmpdir": None}
+        second = {"runtime": "docker", "container_id": "c2", "container_name": "act-CI-b", "tmpdir": None}
+        self._seed([first, second])
+        fake_run = FakeRunFn(default=FakeResult(returncode=0))
+        buf = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session, "_wait_and_reap", side_effect=KeyboardInterrupt):
+                with contextlib.redirect_stdout(buf):
+                    rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1", "c2"])
+
     def test_clean_does_not_report_cleaned_when_removal_fails(self):
         self._seed(
             [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]

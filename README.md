@@ -118,6 +118,11 @@ actbreak: 2 parked debug sessions:
 `running` is still held and attachable; `stopped` and `gone` are orphans to
 clear with `actbreak clean`. With nothing parked it just says so.
 
+`actbreak resume` drops the hold and then waits for the job to finish, so it
+can reap the container instead of leaving a stopped one behind. That wait is
+the rest of your workflow, so it can sit there for a while. Ctrl-C stops
+waiting and leaves the job running; `actbreak clean` reaps it afterwards.
+
 ### VS Code tasks
 
 ```
