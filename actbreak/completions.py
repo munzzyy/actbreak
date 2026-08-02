@@ -1,33 +1,52 @@
+"""Shell completion scripts generated from the argparse parser itself, so a
+new flag or subcommand shows up in completions without anyone remembering to
+edit a second copy of the CLI."""
+
 from __future__ import annotations
 
 import argparse
 
 
-def _extract(parser: argparse.ArgumentParser) -> tuple[list[str], list[str], dict[str, list[str]]]:
-    top_flags: list[str] = []
+def _extract(
+    parser: argparse.ArgumentParser,
+) -> tuple[list[argparse.Action], list[str], dict[str, argparse.ArgumentParser]]:
+    """Return (top-level flag actions, subcommand names, subparser by name)."""
+    top_flags: list[argparse.Action] = []
     commands: list[str] = []
-    cmd_flags: dict[str, list[str]] = {}
+    subparsers: dict[str, argparse.ArgumentParser] = {}
 
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             for cmd, subparser in action.choices.items():
                 commands.append(cmd)
-                flags: list[str] = []
-                for subaction in subparser._actions:
-                    if subaction.option_strings and subaction.option_strings[0] != "-h":
-                        flags.extend(subaction.option_strings)
-                cmd_flags[cmd] = flags
+                subparsers[cmd] = subparser
         elif action.option_strings and action.option_strings[0] != "-h":
-            top_flags.extend(action.option_strings)
+            top_flags.append(action)
 
-    return top_flags, commands, cmd_flags
+    return top_flags, commands, subparsers
+
+
+def _flag_actions(parser: argparse.ArgumentParser) -> list[argparse.Action]:
+    return [a for a in parser._actions if a.option_strings and a.option_strings[0] != "-h"]
+
+
+def _positional_actions(parser: argparse.ArgumentParser) -> list[argparse.Action]:
+    return [a for a in parser._actions if not a.option_strings]
+
+
+def _option_strings(actions: list[argparse.Action]) -> list[str]:
+    out: list[str] = []
+    for action in actions:
+        out.extend(action.option_strings)
+    return out
 
 
 def generate_bash(parser: argparse.ArgumentParser) -> str:
-    top_flags, commands, cmd_flags = _extract(parser)
+    top_flag_actions, commands, subparsers = _extract(parser)
 
     cases = []
-    for cmd, flags in cmd_flags.items():
+    for cmd in commands:
+        flags = _option_strings(_flag_actions(subparsers[cmd]))
         if flags:
             flags_str = " ".join(flags)
             cases.append(
@@ -45,7 +64,7 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
 
     cases_str = "\n".join(cases)
     commands_str = " ".join(commands)
-    top_flags_str = " ".join(top_flags)
+    top_flags_str = " ".join(_option_strings(top_flag_actions))
 
     return f'''\
 _actbreak() {{
@@ -77,28 +96,85 @@ complete -F _actbreak actbreak
 '''
 
 
+def _zsh_description(action: argparse.Action) -> str:
+    """argparse help text, made safe to sit inside an _arguments `[...]`
+    description: zsh ends the description at the first unescaped `]`, and the
+    whole spec is wrapped in single quotes."""
+    text = (action.help or "").replace("%(default)s", str(action.default))
+    text = " ".join(text.split())
+    return text.replace("[", "(").replace("]", ")").replace("'", "")
+
+
+def _zsh_flag_specs(action: argparse.Action) -> list[str]:
+    """One `_arguments` spec per option string. A flag that takes a value gets
+    a `:metavar:` tail so zsh knows to expect one instead of offering the next
+    flag; without it zsh treats every flag as a bare switch."""
+    description = _zsh_description(action)
+    # argparse sets nargs=0 for store_true/store_const; everything else here
+    # consumes a value.
+    takes_value = action.nargs != 0
+    repeatable = isinstance(action, argparse._AppendAction)
+
+    value = ""
+    if takes_value:
+        metavar = action.metavar or action.dest.upper()
+        if action.choices:
+            value = f":{metavar}:({' '.join(str(c) for c in action.choices)})"
+        else:
+            value = f":{metavar}:"
+
+    prefix = "*" if repeatable else ""
+    return [f"'{prefix}{opt}[{description}]{value}'" for opt in action.option_strings]
+
+
+def _zsh_positional_specs(parser: argparse.ArgumentParser) -> list[str]:
+    """Complete a subcommand's positional arguments as filenames. Both
+    commands that take one (`run`, `steps`) take a workflow path."""
+    specs = []
+    for action in _positional_actions(parser):
+        specs.append(f"':{action.dest}:_files'")
+    return specs
+
+
+def _zsh_specs(parser: argparse.ArgumentParser) -> list[str]:
+    specs = _zsh_positional_specs(parser)
+    for action in _flag_actions(parser):
+        specs.extend(_zsh_flag_specs(action))
+    return specs
+
+
 def generate_zsh(parser: argparse.ArgumentParser) -> str:
-    top_flags, commands, cmd_flags = _extract(parser)
+    top_flag_actions, commands, subparsers = _extract(parser)
 
     cases = []
-    for cmd, flags in cmd_flags.items():
-        if flags:
-            flag_args = " ".join(f'"{f}"' for f in flags)
+    for cmd in commands:
+        specs = _zsh_specs(subparsers[cmd])
+        if specs:
+            joined = " \\\n                        ".join(specs)
             cases.append(
-                f'''        {cmd})
-            _arguments {flag_args}
-            ;;'''
+                f'''                {cmd})
+                    _arguments \\
+                        {joined}
+                    ;;'''
             )
         else:
             cases.append(
-                f'''        {cmd})
-            ;;'''
+                f'''                {cmd})
+                    ;;'''
             )
 
     cases_str = "\n".join(cases)
-    top_flag_args = " ".join(f'"{f}"' for f in top_flags)
+    top_specs: list[str] = []
+    for action in top_flag_actions:
+        top_specs.extend(_zsh_flag_specs(action))
+    top_flag_args = " \\\n        ".join(top_specs)
     commands_args = " ".join(f'"{c}"' for c in commands)
 
+    # `#compdef actbreak` makes this work when it's dropped in $fpath as
+    # `_actbreak`; the trailing `compdef` call makes `source <(...)` work too.
+    # Calling `_actbreak "$@"` here instead (the obvious-looking thing) runs
+    # _arguments outside a completion context, which errors and registers
+    # nothing.
     return f'''\
 #compdef actbreak
 
@@ -123,5 +199,5 @@ _actbreak() {{
     esac
 }}
 
-_actbreak "$@"
+compdef _actbreak actbreak
 '''

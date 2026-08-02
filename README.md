@@ -150,6 +150,19 @@ source <(actbreak --completions bash)
 source <(actbreak --completions zsh)
 ```
 
+For zsh, the persistent version is a file in your `$fpath`, which is what
+`#compdef` at the top of the script is for:
+
+```bash
+mkdir -p ~/.zfunc
+actbreak --completions zsh > ~/.zfunc/_actbreak
+# in ~/.zshrc, before compinit:
+#   fpath=(~/.zfunc $fpath)
+```
+
+Either way you need `compinit` to have run, which most zsh setups (and
+oh-my-zsh) already do.
+
 ### Examples
 
 ```

@@ -93,11 +93,51 @@ class ParserTests(unittest.TestCase):
     def test_completions_zsh_covers_parser(self):
         out = self._completions("zsh")
         self.assertIn("#compdef actbreak", out)
-        for token in ('"run"', '"resume"', '"clean"', '"init-vscode"', '"--version"',
-                      '"--completions"', '"--break-before"', '"--break-after"',
-                      '"--break-on-failure"', '"--job"', '"--runtime"',
-                      '"--no-attach"', '"--act-arg"', '"-v"', '"--verbose"'):
+        for token in ('"run"', '"resume"', '"clean"', '"init-vscode"',
+                      "'--version[", "'--completions[", "'--break-before[",
+                      "'--break-after[", "'--break-on-failure[", "'--job[",
+                      "'--runtime[", "'--no-attach[", "--act-arg[", "'-v[",
+                      "'--verbose["):
             self.assertIn(token, out)
+
+    def test_completions_zsh_registers_itself_when_sourced(self):
+        # The README tells you to `source <(actbreak --completions zsh)`.
+        # `#compdef` alone only works from $fpath, and calling _actbreak at the
+        # end runs _arguments outside a completion context, which errors.
+        out = self._completions("zsh")
+        self.assertIn("#compdef actbreak", out)
+        self.assertIn("compdef _actbreak actbreak", out)
+        self.assertNotIn('_actbreak "$@"', out)
+
+    def test_completions_zsh_flags_that_take_a_value_say_so(self):
+        out = self._completions("zsh")
+        # A value-taking flag needs a `:metavar:` tail or zsh offers the next
+        # flag where the value belongs.
+        self.assertIn("'--break-before[pause immediately before STEP runs", out)
+        self.assertIn("]:STEP:'", out)
+        self.assertIn("]:JOB:'", out)
+        # Choices become a completable value list.
+        self.assertIn(":RUNTIME:(docker podman auto)'", out)
+        # --act-arg is repeatable, so it needs the `*` prefix.
+        self.assertIn("'*--act-arg[", out)
+        # A bare switch must not claim to take one.
+        self.assertNotIn("--no-attach[dont exec a shell automatically; print the attach "
+                         "command and hold, then exit]:", out)
+
+    def test_completions_zsh_descriptions_cannot_break_the_spec(self):
+        # `_arguments` specs are single-quoted and their description ends at
+        # the first `]`, so neither character may survive into one.
+        out = self._completions("zsh")
+        for line in out.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("'") and not stripped.startswith("'*"):
+                continue
+            body = stripped.rstrip("\\").strip().strip("'")
+            if "[" not in body:
+                continue
+            description = body.split("[", 1)[1].split("]", 1)[0]
+            self.assertNotIn("'", description, line)
+            self.assertNotIn("[", description, line)
 
     def test_missing_command_is_an_error(self):
         parser = build_parser()
