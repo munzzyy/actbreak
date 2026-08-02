@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,12 +7,12 @@ name = "actbreak"
 version = "0.2.0"
 description = "A local breakpoint debugger for GitHub Actions workflows, wrapping act."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [{ name = "Cole Munz" }]
 keywords = ["github-actions", "act", "debugger", "breakpoint", "ci", "local-ci"]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
