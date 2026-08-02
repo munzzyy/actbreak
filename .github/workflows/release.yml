@@ -24,6 +24,30 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Nothing tied the artifact to the tag before this, and the two version
+      # strings could drift from each other silently. PyPI keeps whatever a
+      # publish uploads, so catch a mismatch here rather than after it ships.
+      - name: Check the version is consistent and matches the tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          PKG=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          MOD=$(python -c "import actbreak; print(actbreak.__version__)")
+          if [ "$PKG" != "$MOD" ]; then
+            echo "pyproject version $PKG does not match actbreak.__version__ $MOD"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            if [ "$TAG" != "$PKG" ]; then
+              echo "release tag $GITHUB_REF_NAME does not match version $PKG"
+              exit 1
+            fi
+          fi
+          echo "building version $PKG"
+          echo "PKG_VERSION=$PKG" >> "$GITHUB_ENV"
+
       - name: Build sdist and wheel
         run: |
           python -m pip install --upgrade build twine
@@ -34,10 +58,15 @@ jobs:
 
       - name: Install the built wheel and smoke-test it
         run: |
+          set -euo pipefail
           python -m venv /tmp/v
           /tmp/v/bin/python -m pip install dist/*.whl
           /tmp/v/bin/python -c "import actbreak"
-          /tmp/v/bin/actbreak --version
+          GOT=$(/tmp/v/bin/actbreak --version)
+          echo "$GOT"
+          # Assert, don't just print: the wheel about to be published has to
+          # report the version this run checked.
+          test "$GOT" = "actbreak $PKG_VERSION"
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
