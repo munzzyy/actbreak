@@ -90,7 +90,19 @@ class BreakBeforeIntegrationTest(unittest.TestCase):
                 interrupt_check=lambda: None,
                 timeout=300,
             )
-            self.assertIsNotNone(container, "act exited before the breakpoint was ever reached")
+            if container is None:
+                # act exited instead of holding. Its output is the only clue,
+                # so put it in the failure instead of swallowing it.
+                out = b""
+                try:
+                    out = proc.stdout.read() or b""
+                except Exception:
+                    pass
+                tail = out.decode("utf-8", "replace")[-4000:]
+                self.fail(
+                    "act exited before the breakpoint was ever reached; "
+                    f"exit code {proc.returncode}, output tail:\n{tail}"
+                )
             container_name = container.name
 
             self.assertTrue(
