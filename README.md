@@ -44,6 +44,8 @@ actbreak run <workflow.yml> --break-before <step>
 actbreak run <workflow.yml> --break-after <step>
 actbreak run <workflow.yml> --break-on-failure
 
+actbreak steps <workflow.yml>
+
 actbreak resume
 actbreak clean
 actbreak list
@@ -56,6 +58,28 @@ under `.github/workflows/`.
 
 A step selector is either a step's `name:` value, or `<job>:<index>` to select
 by zero-based position (use this for steps with no `name:`).
+
+### Finding a step to break on
+
+```
+actbreak steps ci.yml
+```
+
+Prints every selector the workflow offers, selector first so you can paste one
+straight into `--break-before` or `--break-after`:
+
+```
+build:
+  build:0  Checkout
+  build:1  Install deps
+  build:2  Run tests
+lint:
+  lint:0  Checkout
+  lint:1  (unnamed)
+```
+
+`--job JOB` narrows it to one job. Steps with no `name:` show as `(unnamed)`;
+those are the ones you have to select by position.
 
 ### `run` flags
 
@@ -124,6 +148,7 @@ source <(actbreak --completions zsh)
 ### Examples
 
 ```
+actbreak steps ci.yml
 actbreak run ci.yml --break-before "Run tests"
 actbreak run ci.yml --job build --break-before build:2
 actbreak run ci.yml --break-after "Build" --no-attach

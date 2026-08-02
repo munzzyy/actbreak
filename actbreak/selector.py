@@ -88,6 +88,7 @@ def resolve_selector(
         scope = f"in job '{job_hint}'" if job_hint else "in any job"
         raise SelectorError(
             f"no step named '{selector}' found {scope}; "
-            "select by position instead with '<job>:<index>'"
+            "run 'actbreak steps <workflow>' to see the selectable steps, "
+            "or select by position with '<job>:<index>'"
         )
     return by_name

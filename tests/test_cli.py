@@ -121,6 +121,23 @@ class ParserTests(unittest.TestCase):
         self.assertIn("list", self._completions("bash"))
         self.assertIn('"list"', self._completions("zsh"))
 
+    def test_steps_takes_a_workflow_and_an_optional_job(self):
+        parser = build_parser()
+        args = parser.parse_args(["steps", "ci.yml"])
+        self.assertEqual(args.command, "steps")
+        self.assertEqual(args.workflow, "ci.yml")
+        self.assertIsNone(args.job)
+        self.assertEqual(parser.parse_args(["steps", "ci.yml", "--job", "build"]).job, "build")
+
+    def test_steps_requires_a_workflow(self):
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["steps"])
+
+    def test_completions_cover_the_steps_command(self):
+        self.assertIn("steps", self._completions("bash"))
+        self.assertIn("steps", self._completions("zsh"))
+
 
 class MainDispatchTests(unittest.TestCase):
     def test_main_dispatches_run_to_session(self):
@@ -144,6 +161,12 @@ class MainDispatchTests(unittest.TestCase):
     def test_main_dispatches_list(self):
         with mock.patch("actbreak.session.cmd_list", return_value=0) as fake:
             rc = main(["list"])
+        self.assertEqual(rc, 0)
+        fake.assert_called_once()
+
+    def test_main_dispatches_steps(self):
+        with mock.patch("actbreak.session.cmd_steps", return_value=0) as fake:
+            rc = main(["steps", "ci.yml"])
         self.assertEqual(rc, 0)
         fake.assert_called_once()
 

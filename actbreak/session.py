@@ -22,7 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import injector
-from .errors import ActbreakError, AmbiguousContainerError, ContainerNotFoundError, SessionError
+from .errors import (
+    ActbreakError,
+    AmbiguousContainerError,
+    ContainerNotFoundError,
+    SelectorError,
+    SessionError,
+)
 from .runtime import CommandRunner, Container, detect_runtime, find_job_container, require_act
 from .selector import resolve_selector
 
@@ -483,6 +489,43 @@ def cmd_clean(args) -> int:
             if runner.file_exists(engine, c.id, "/tmp/actbreak/hold"):
                 runner.rm_container(engine, c.id)
                 print(f"actbreak: cleaned stray container {c.name}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# steps
+# ---------------------------------------------------------------------------
+
+
+def cmd_steps(args) -> int:
+    """Print the steps a workflow offers, selector first, so there's a way to
+    find a valid selector short of reading the YAML and counting by hand."""
+    workflow_path, _ = locate_workflow(args.workflow)
+    text, _ = injector.read_workflow_text(str(workflow_path))
+    jobs = injector.parse_workflow(text.splitlines(keepends=True))
+
+    job_filter = getattr(args, "job", None)
+    if job_filter is not None and job_filter not in jobs:
+        raise SelectorError(
+            f"job '{job_filter}' not found (available jobs: {', '.join(sorted(jobs)) or 'none'})"
+        )
+    wanted = [job_filter] if job_filter else sorted(jobs)
+
+    total = 0
+    for job_name in wanted:
+        steps = jobs[job_name].steps
+        print(f"{job_name}:")
+        if not steps:
+            print("  (no steps)")
+            continue
+        width = max(len(f"{job_name}:{s.index}") for s in steps)
+        for step in steps:
+            selector = f"{job_name}:{step.index}"
+            print(f"  {selector.ljust(width)}  {step.name if step.name else '(unnamed)'}")
+        total += len(steps)
+
+    if total == 0:
+        print(f"actbreak: no steps to break on in {workflow_path}", file=sys.stderr)
     return 0
 
 

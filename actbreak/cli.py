@@ -16,6 +16,7 @@ examples:
   actbreak run ci.yml --job build --break-before build:2
   actbreak run ci.yml --break-after "Build" --job build --no-attach
   actbreak run ci.yml --break-on-failure
+  actbreak steps ci.yml
   actbreak resume
   actbreak clean
   actbreak list
@@ -24,7 +25,8 @@ examples:
 step selectors:
   a step name (matched against the step's `name:` in the workflow), or
   "<job>:<index>" to select by zero-based position, e.g. "build:0" -- use
-  this for steps that have no `name:`.
+  this for steps that have no `name:`. `actbreak steps <workflow>` prints
+  every selector a workflow offers.
 
 notes:
   --act-arg is passed straight through to `act`, repeatably. If the value
@@ -123,6 +125,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    steps_p = sub.add_parser(
+        "steps",
+        help="list the selectable steps in a workflow",
+        description=(
+            "Print every step actbreak can break on in a workflow, one per "
+            "line, as '<job>:<index>  <name>'. The selector comes first so it "
+            "can be pasted straight into --break-before / --break-after."
+        ),
+    )
+    steps_p.add_argument(
+        "workflow",
+        help="workflow file (a path, or a bare name looked up under .github/workflows)",
+    )
+    steps_p.add_argument("--job", metavar="JOB", help="only show this job's steps")
+
     sub.add_parser(
         "init-vscode",
         help="generate a VS Code task per (workflow, job, step) under .github/workflows/",
@@ -158,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
             return session.cmd_clean(args)
         if args.command == "list":
             return session.cmd_list(args)
+        if args.command == "steps":
+            return session.cmd_steps(args)
         if args.command == "init-vscode":
             from . import vscode_tasks
 

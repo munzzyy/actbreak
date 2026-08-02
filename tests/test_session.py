@@ -18,9 +18,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from actbreak import session
-from actbreak.errors import SessionError
+from actbreak import injector, session
+from actbreak.errors import SelectorError, SessionError
 from actbreak.runtime import CommandRunner, Container
+from actbreak.selector import resolve_selector
+
+from .util import fixture_path
 
 # Canned `ps --format {{.ID}}\t{{.Names}}\t{{.Status}}` output, same shape
 # tests/test_runtime.py uses.
@@ -772,6 +775,62 @@ class CmdListTests(unittest.TestCase):
         self._run_list(fake_run)
         rm_calls = [c for c in fake_run.calls if "rm" in c]
         self.assertEqual(rm_calls, [], f"list must not remove anything, got: {fake_run.calls}")
+
+
+# ---------------------------------------------------------------------------
+# cmd_steps
+# ---------------------------------------------------------------------------
+
+
+class CmdStepsTests(unittest.TestCase):
+    """`actbreak steps` is the only way to discover a valid selector without
+    reading the workflow by hand, so its output has to be paste-ready."""
+
+    def _run_steps(self, fixture, job=None):
+        args = SimpleNamespace(workflow=fixture_path(fixture), job=job)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = session.cmd_steps(args)
+        return rc, buf.getvalue()
+
+    def test_lists_every_job_and_step_with_a_pastable_selector(self):
+        rc, out = self._run_steps("multi_job.yml")
+        self.assertEqual(rc, 0)
+        for selector in ("lint:0", "lint:1", "build:0", "build:2", "test:2"):
+            self.assertIn(selector, out)
+        self.assertIn("Upload artifact", out)
+        # Jobs come out sorted, so the output is stable across runs.
+        self.assertLess(out.index("build:"), out.index("lint:"))
+
+    def test_job_filter_shows_only_that_job(self):
+        rc, out = self._run_steps("multi_job.yml", job="lint")
+        self.assertEqual(rc, 0)
+        self.assertIn("lint:1", out)
+        self.assertNotIn("build:", out)
+        self.assertNotIn("test:", out)
+
+    def test_unknown_job_names_the_jobs_that_do_exist(self):
+        with self.assertRaises(SelectorError) as ctx:
+            self._run_steps("multi_job.yml", job="nope")
+        message = str(ctx.exception)
+        self.assertIn("nope", message)
+        self.assertIn("build", message)
+
+    def test_unnamed_steps_are_listed_by_position(self):
+        rc, out = self._run_steps("unnamed_steps.yml")
+        self.assertEqual(rc, 0)
+        self.assertIn("build:0", out)
+        self.assertIn("(unnamed)", out)
+        self.assertIn("Run tests", out)
+
+    def test_selector_error_points_at_the_steps_command(self):
+        # The dead end this command exists to fix: a bad --break-before should
+        # say where to find the real names.
+        text, _ = injector.read_workflow_text(fixture_path("multi_job.yml"))
+        jobs = injector.parse_workflow(text.splitlines(keepends=True))
+        with self.assertRaises(SelectorError) as ctx:
+            resolve_selector(jobs, "Nope")
+        self.assertIn("actbreak steps", str(ctx.exception))
 
 
 if __name__ == "__main__":
