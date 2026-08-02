@@ -75,7 +75,16 @@ class BreakBeforeIntegrationTest(unittest.TestCase):
 
             act_bin = require_act()
             proc = subprocess.Popen(
-                [act_bin, "-W", inject_dir, "-j", "smoke", "--reuse"],
+                # -P pins the runner image explicitly. Without it, a fresh act
+                # install pops an interactive image-picker on first run and
+                # dies with "fatal msg=EOF" on CI's non-tty stdin.
+                [
+                    act_bin,
+                    "-W", inject_dir,
+                    "-j", "smoke",
+                    "--reuse",
+                    "-P", "ubuntu-latest=catthehacker/ubuntu:act-latest",
+                ],
                 cwd=repo_root,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
