@@ -33,7 +33,14 @@ class AmbiguousContainerError(ContainerNotFoundError):
     not-found case because it's a subclass of ContainerNotFoundError so
     existing `except ContainerNotFoundError` call sites still catch it
     unchanged -- callers that need to treat "ambiguous" differently from
-    "not found yet, keep polling" can catch this more specific type first."""
+    "not found yet, keep polling" can catch this more specific type first.
+
+    Carries the matching container names so a caller that knows the container
+    engine can turn them into real attach commands."""
+
+    def __init__(self, message: str, candidates: list[str] | None = None):
+        super().__init__(message)
+        self.candidates = list(candidates or [])
 
 
 class SessionError(ActbreakError):

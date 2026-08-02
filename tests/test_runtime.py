@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 
-from actbreak.errors import ContainerNotFoundError, ToolNotFoundError
+from actbreak.errors import AmbiguousContainerError, ContainerNotFoundError, ToolNotFoundError
 from actbreak.runtime import (
     CommandRunner,
     Container,
@@ -104,6 +104,33 @@ class FindJobContainerTests(unittest.TestCase):
         with self.assertRaises(ContainerNotFoundError) as ctx:
             find_job_container(containers, "test")
         self.assertIn("multiple containers match", str(ctx.exception))
+
+    def test_matrix_legs_of_one_workflow_get_a_message_that_helps(self):
+        # Every candidate is the same job in the same workflow, so the old
+        # "narrow with the workflow name" was advice the user could not act
+        # on. Say it's a matrix and name the legs.
+        containers = parse_ps_output(MATRIX_PS)
+        with self.assertRaises(AmbiguousContainerError) as ctx:
+            find_job_container(containers, "test", workflow="Matrix CI")
+        message = str(ctx.exception)
+        self.assertIn("matrix", message)
+        self.assertNotIn("narrow with the workflow name", message)
+        for name in ("act-Matrix-CI-test-3.10-ubuntu-latest",
+                     "act-Matrix-CI-test-3.11-ubuntu-latest"):
+            self.assertIn(name, message)
+            self.assertIn(name, ctx.exception.candidates)
+
+    def test_ambiguous_across_workflows_still_says_to_narrow(self):
+        # Different workflows: naming the workflow really does resolve it, so
+        # keep that advice.
+        containers = parse_ps_output(
+            "aaaaaaaaaaaa\tact-Build-Pipeline-build\tUp 1 minute\n"
+            "bbbbbbbbbbbb\tact-Deploy-Pipeline-build\tUp 1 minute\n"
+        )
+        with self.assertRaises(AmbiguousContainerError) as ctx:
+            find_job_container(containers, "build")
+        self.assertIn("narrow with the workflow name", str(ctx.exception))
+        self.assertEqual(len(ctx.exception.candidates), 2)
 
     def test_no_match_raises_with_seen_containers_listed(self):
         containers = parse_ps_output(SINGLE_JOB_PS)

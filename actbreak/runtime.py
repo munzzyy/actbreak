@@ -98,9 +98,23 @@ def find_job_container(
             f"no running act container found for job '{job}' (act containers seen: {seen})"
         )
     if len(candidates) > 1:
-        names = ", ".join(c.name for c in candidates)
+        names = [c.name for c in candidates]
+        joined = ", ".join(names)
+        if workflow and all(normalize_name(workflow) in normalize_name(c.name) for c in candidates):
+            # Same job, same workflow, several containers: that's a matrix job,
+            # one container per leg. There is nothing left to narrow by, so
+            # telling the user to "narrow with the workflow name" (the old
+            # message) sends them somewhere that cannot help. Name the legs
+            # instead so they can attach to the one they care about.
+            raise AmbiguousContainerError(
+                f"job '{job}' is running as {len(names)} containers at once, which is what "
+                f"act does with a matrix job: {joined}. actbreak can't tell the legs apart, "
+                "so it won't guess which one you meant. Attach to the leg you want by hand.",
+                candidates=names,
+            )
         raise AmbiguousContainerError(
-            f"multiple containers match job '{job}': {names}; narrow with the workflow name"
+            f"multiple containers match job '{job}': {joined}; narrow with the workflow name",
+            candidates=names,
         )
     return candidates[0]
 

@@ -242,6 +242,24 @@ class WaitForBreakpointTests(unittest.TestCase):
             )
         self.assertIn("multiple containers match", str(ctx.exception))
 
+    def test_matrix_ambiguity_spells_out_the_attach_commands(self):
+        # runtime.py names the legs but has no idea which engine is in use,
+        # so the runnable command has to be added here.
+        matrix_ps = (
+            "aaaaaaaaaaaa\tact-Matrix-CI-test-3.10-ubuntu-latest\tUp 1 minute\n"
+            "bbbbbbbbbbbb\tact-Matrix-CI-test-3.11-ubuntu-latest\tUp 1 minute\n"
+        )
+        runner = CommandRunner(run=FakeRunFn({"ps": FakeResult(stdout=matrix_ps)}))
+        proc = FakePopen(running=True)
+        with self.assertRaises(SessionError) as ctx:
+            session.wait_for_breakpoint(
+                proc, runner, "podman", "test", "Matrix CI", _no_interrupt, timeout=5
+            )
+        message = str(ctx.exception)
+        self.assertIn("matrix", message)
+        self.assertIn("podman exec -it act-Matrix-CI-test-3.10-ubuntu-latest sh", message)
+        self.assertIn("podman exec -it act-Matrix-CI-test-3.11-ubuntu-latest sh", message)
+
     def test_hold_file_found_returns_the_container(self):
         runner = CommandRunner(
             run=FakeRunFn(

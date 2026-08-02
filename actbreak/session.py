@@ -246,7 +246,13 @@ def wait_for_breakpoint(
             # More than one candidate container is never going to resolve
             # itself by waiting -- surface it now instead of spinning for
             # up to `timeout` and then reporting a misleading "timed out".
-            raise SessionError(str(e)) from e
+            # runtime.py names the candidates but doesn't know the engine, so
+            # spell the attach commands out here where we do.
+            message = str(e)
+            if e.candidates:
+                commands = " or ".join(_attach_command_str(engine, n) for n in e.candidates)
+                message = f"{message} Run: {commands}"
+            raise SessionError(message) from e
         except ContainerNotFoundError:
             time.sleep(POLL_INTERVAL)
             continue

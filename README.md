@@ -198,6 +198,10 @@ actbreak run ci.yml --break-on-failure
 
 ## Limitations
 
+- Matrix jobs are a hard stop. act runs one container per leg and they all
+  carry the same job id, so actbreak can't tell them apart and refuses to
+  guess. It names the containers and prints the `docker exec` / `podman exec`
+  command for each, so you can attach to the leg you want by hand.
 - The breakpoint step needs a real shell in the job container: it runs `sh`
   with `mkdir`, `printf`, and `sleep`. A `scratch` or distroless image without
   those won't hold at the breakpoint.
