@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -734,6 +735,35 @@ class CmdResumeTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _session_age
+# ---------------------------------------------------------------------------
+
+
+class SessionAgeTests(unittest.TestCase):
+    def test_none_for_missing_timestamp(self):
+        self.assertIsNone(session._session_age(None))
+        self.assertIsNone(session._session_age(""))
+
+    def test_none_for_unparseable_timestamp(self):
+        self.assertIsNone(session._session_age("not-a-timestamp"))
+
+    def test_minutes_under_an_hour(self):
+        created_at = (datetime.now(timezone.utc) - timedelta(minutes=42)).isoformat()
+        self.assertEqual(session._session_age(created_at), "42m")
+
+    def test_hours_at_and_past_sixty_minutes(self):
+        created_at = (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat()
+        self.assertEqual(session._session_age(created_at), "1h")
+
+    def test_naive_timestamp_treated_as_utc(self):
+        # created_at is always written with datetime.now(timezone.utc), but a
+        # stray naive timestamp must not raise trying to subtract it from an
+        # aware one.
+        created_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).replace(tzinfo=None).isoformat()
+        self.assertEqual(session._session_age(created_at), "10m")
+
+
+# ---------------------------------------------------------------------------
 # cmd_list
 # ---------------------------------------------------------------------------
 
@@ -838,6 +868,44 @@ class CmdListTests(unittest.TestCase):
         self.assertIn("act-CI2-build [running]", out)
         ps_calls = [c for c in fake_run.calls if "ps" in c]
         self.assertEqual(len(ps_calls), 1, f"the per-engine listing must be cached, got: {fake_run.calls}")
+
+    def test_session_age_shown_in_minutes_under_an_hour(self):
+        created_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        self._seed(
+            [
+                {
+                    "runtime": "docker",
+                    "container_id": "c1",
+                    "container_name": "act-CI-build",
+                    "tmpdir": None,
+                    "created_at": created_at,
+                }
+            ]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        rc, out = self._run_list(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("held for 5m", out)
+
+    def test_session_age_shown_in_hours_past_sixty_minutes(self):
+        created_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build",
+              "tmpdir": None, "created_at": created_at}]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        rc, out = self._run_list(fake_run)
+        self.assertIn("held for 5h", out)
+
+    def test_missing_created_at_omits_the_age_entirely(self):
+        # An older state file (or one from `clean`'s stray-container sweep,
+        # which never records one) shouldn't print a bogus age.
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        rc, out = self._run_list(fake_run)
+        self.assertNotIn("held for", out)
 
     def test_list_never_removes_a_container(self):
         # list is read-only -- it inspects status, it must never rm anything.

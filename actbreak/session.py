@@ -582,6 +582,26 @@ def _container_status(runner: CommandRunner, engine: str, container_id: str, cac
     return "running" if match.status.lower().startswith("up") else "stopped"
 
 
+def _session_age(created_at: str | None) -> str | None:
+    """Format how long a session has been parked, as 'Xm' under an hour or
+    'Xh' from there -- so `actbreak list` can flag which held session has
+    been sitting for 5 minutes vs 5 hours (a likely orphan worth `clean`ing).
+    Returns None for a missing or unparseable timestamp (an older state file
+    predating this field, say) rather than raising."""
+    if not created_at:
+        return None
+    try:
+        started = datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    minutes = max(int((datetime.now(timezone.utc) - started).total_seconds() // 60), 0)
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h"
+
+
 def cmd_list(args) -> int:
     """Show the debug sessions parked by `run --no-attach` (or a resume/clean
     that couldn't finish), each annotated with its live container status so you
@@ -603,5 +623,7 @@ def cmd_list(args) -> int:
         label = s.get("label") or "?"
         position = s.get("position") or "?"
         workflow = s.get("workflow") or "?"
-        print(f"  {name} [{status}] -- job '{job}', step '{label}' ({position}) -- {workflow}")
+        age = _session_age(s.get("created_at"))
+        age_suffix = f", held for {age}" if age else ""
+        print(f"  {name} [{status}] -- job '{job}', step '{label}' ({position}){age_suffix} -- {workflow}")
     return 0
