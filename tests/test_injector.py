@@ -302,6 +302,60 @@ class InjectorSpliceTests(unittest.TestCase):
         self.assertIn("run: echo last\n      - name:", result_text)
 
 
+class InjectMultiTests(unittest.TestCase):
+    """inject_multi() splices several breakpoints into one workflow, for
+    stepping through more than one in a single `actbreak run`."""
+
+    def test_two_breakpoints_both_land_and_are_ordered_by_file_position(self):
+        text, lines, jobs, _ = load("basic.yml")
+        # Given in reverse-of-hit order on purpose: hit order must come from
+        # where each one lands in the file, not from `targets`' own order.
+        targets = [("build", 2, "before"), ("build", 0, "after")]
+        new_lines, hit_order = injector.inject_multi(lines, jobs, targets)
+        self.assertEqual(hit_order, [("Checkout", "after"), ("Run tests", "before")])
+
+        result_text = "".join(new_lines)
+        # Both banners present, and in file order matching hit_order.
+        after_pos = result_text.index("BREAKPOINT HIT (after)")
+        before_pos = result_text.index("BREAKPOINT HIT (before)")
+        self.assertLess(after_pos, before_pos)
+
+        result_jobs = injector.parse_workflow(new_lines)
+        self.assertEqual(len(result_jobs["build"].steps), 6)
+        names = [s.name for s in result_jobs["build"].steps]
+        # Original four steps still present, in their original relative
+        # order, with the two injected holds sitting where they belong.
+        self.assertEqual(
+            [n for n in names if n not in (None,) and "actbreak breakpoint" not in n],
+            ["Checkout", "Install deps", "Run tests"],
+        )
+
+    def test_targets_must_not_be_empty(self):
+        _, lines, jobs, _ = load("basic.yml")
+        with self.assertRaises(ValueError):
+            injector.inject_multi(lines, jobs, [])
+
+    def test_bad_target_raises_injection_error_same_as_inject(self):
+        _, lines, jobs, _ = load("basic.yml")
+        with self.assertRaises(InjectionError):
+            injector.inject_multi(lines, jobs, [("build", 0, "before"), ("no-such-job", 0, "before")])
+
+    def test_inject_multi_file_writes_and_returns_hit_order(self):
+        import tempfile
+        from pathlib import Path
+
+        text, lines, jobs, _ = load("basic.yml")
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = str(Path(tmp) / "out.yml")
+            hit_order = injector.inject_multi_file(
+                fixture_path("basic.yml"), dest, [("build", 3, "after"), ("build", 1, "before")]
+            )
+            self.assertEqual(hit_order, [("Install deps", "before"), ("build:3", "after")])
+            written = Path(dest).read_text()
+        self.assertIn("BREAKPOINT HIT (before)", written)
+        self.assertIn("BREAKPOINT HIT (after)", written)
+
+
 class InjectorGoldenTests(unittest.TestCase):
     """Hand-authored expected output for a few representative cases, typed
     independently of the production code, as a check against bugs that could

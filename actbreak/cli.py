@@ -15,7 +15,9 @@ examples:
   actbreak run ci.yml --break-before "Run tests"
   actbreak run ci.yml --job build --break-before build:2
   actbreak run ci.yml --break-after "Build" --job build --no-attach
+  actbreak run ci.yml --break-before "Install deps" --break-after "Build"
   actbreak run ci.yml --break-on-failure
+  actbreak run ci.yml --break-before "Run tests" --shell bash
   actbreak steps ci.yml
   actbreak resume
   actbreak clean
@@ -29,11 +31,35 @@ step selectors:
   every selector a workflow offers.
 
 notes:
+  --break-before and --break-after are both repeatable and can be mixed, to
+  set several breakpoints in one run and step through them in the order the
+  job actually reaches them (which is by file position, not the order you
+  passed them in). All of a single run's breakpoints must resolve to the
+  same job.
+
   --act-arg is passed straight through to `act`, repeatably. If the value
   itself starts with '-' (e.g. -P or --pull=false), use the "=" form so
   argparse doesn't mistake it for one of actbreak's own flags:
   --act-arg=-P, --act-arg=--pull=false.
 """
+
+
+class BreakpointAction(argparse.Action):
+    """Append a (position, selector) pair to a single shared list, so
+    --break-before and --break-after can be mixed and repeated to set
+    several breakpoints in one run instead of exactly one. `const` carries
+    which flag this is ('before' or 'after'); `repeatable` is read by
+    completions.py so the generated zsh script marks these flags as
+    repeatable the same way it does for --act-arg."""
+
+    repeatable = True
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = getattr(namespace, self.dest, None)
+        if items is None:
+            items = []
+        items.append((self.const, values))
+        setattr(namespace, self.dest, items)
 
 
 class PrintCompletionsAction(argparse.Action):
@@ -75,16 +101,21 @@ def build_parser() -> argparse.ArgumentParser:
         "workflow",
         help="workflow file to run (a path, or a bare name looked up under .github/workflows)",
     )
-    break_group = run_p.add_mutually_exclusive_group()
-    break_group.add_argument(
+    run_p.add_argument(
         "--break-before",
+        action=BreakpointAction,
+        const="before",
+        dest="breakpoints",
         metavar="STEP",
-        help="pause immediately before STEP runs (name, or '<job>:<index>')",
+        help="pause immediately before STEP runs (name, or '<job>:<index>'); repeatable",
     )
-    break_group.add_argument(
+    run_p.add_argument(
         "--break-after",
+        action=BreakpointAction,
+        const="after",
+        dest="breakpoints",
         metavar="STEP",
-        help="pause immediately after STEP runs (name, or '<job>:<index>')",
+        help="pause immediately after STEP runs (name, or '<job>:<index>'); repeatable",
     )
     run_p.add_argument(
         "--break-on-failure",
@@ -102,6 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-attach",
         action="store_true",
         help="don't exec a shell automatically; print the attach command and hold, then exit",
+    )
+    run_p.add_argument(
+        "--shell",
+        metavar="SHELL",
+        help="shell to attach with, e.g. zsh or 'bash -l' (default: try sh, then bash)",
     )
     run_p.add_argument(
         "--act-arg",
@@ -153,7 +189,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_run_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if not (args.break_before or args.break_after or args.break_on_failure):
+    args.breakpoints = args.breakpoints or []
+    if not (args.breakpoints or args.break_on_failure):
         parser.error("run: give at least one of --break-before, --break-after, or --break-on-failure")
 
 

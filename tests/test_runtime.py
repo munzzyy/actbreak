@@ -235,6 +235,22 @@ class CommandRunnerTests(unittest.TestCase):
             [["docker", "exec", "-it", "c1", "sh"], ["docker", "exec", "-it", "c1", "bash"]],
         )
 
+    def test_exec_interactive_honors_a_custom_shell(self):
+        fake = FakeRunner({"exec -it c1 zsh": FakeResult(returncode=0)})
+        runner = CommandRunner(run=fake)
+        rc = runner.exec_interactive("docker", "c1", shells=("zsh",))
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.calls, [["docker", "exec", "-it", "c1", "zsh"]])
+
+    def test_exec_interactive_splits_a_shell_with_its_own_argument(self):
+        # --shell 'bash -l' must run as bash with -l, not a lookup for a
+        # binary literally named 'bash -l'.
+        fake = FakeRunner({"exec -it c1 bash -l": FakeResult(returncode=0)})
+        runner = CommandRunner(run=fake)
+        rc = runner.exec_interactive("docker", "c1", shells=("bash -l",))
+        self.assertEqual(rc, 0)
+        self.assertEqual(fake.calls, [["docker", "exec", "-it", "c1", "bash", "-l"]])
+
     def test_exec_interactive_does_not_fall_back_on_real_failure(self):
         fake = FakeRunner({"exec -it c1 sh": FakeResult(returncode=1)})
         runner = CommandRunner(run=fake)

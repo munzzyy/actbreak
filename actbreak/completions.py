@@ -113,7 +113,7 @@ def _zsh_flag_specs(action: argparse.Action) -> list[str]:
     # argparse sets nargs=0 for store_true/store_const; everything else here
     # consumes a value.
     takes_value = action.nargs != 0
-    repeatable = isinstance(action, argparse._AppendAction)
+    repeatable = isinstance(action, argparse._AppendAction) or getattr(action, "repeatable", False)
 
     value = ""
     if takes_value:

@@ -453,9 +453,14 @@ def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newl
     return out
 
 
-def inject(lines: list[str], jobs: dict[str, JobInfo], job: str, step_index: int, position: str) -> list[str]:
-    """Return a new list of lines with the hold step spliced in. `position` is
-    'before' or 'after' the target step. Does not mutate `lines`."""
+def _resolve_injection_point(
+    jobs: dict[str, JobInfo], job: str, step_index: int, position: str
+) -> tuple[int, str, int]:
+    """Validate one (job, step_index, position) breakpoint target and return
+    the line index to splice at, the step's label, and the dash-indent of
+    the job's step list -- the three things build_hold_lines() needs.
+    Shared by inject() and inject_multi() so a single-breakpoint run and a
+    multi-breakpoint run are validated identically."""
     if position not in ("before", "after"):
         raise ValueError(f"position must be 'before' or 'after', got {position!r}")
     if job not in jobs:
@@ -469,6 +474,13 @@ def inject(lines: list[str], jobs: dict[str, JobInfo], job: str, step_index: int
     step = j.steps[step_index]
     insert_at = step.start if position == "before" else step.end
     label = step.name if step.name is not None else f"{job}:{step_index}"
+    return insert_at, label, j.step_item_indent
+
+
+def inject(lines: list[str], jobs: dict[str, JobInfo], job: str, step_index: int, position: str) -> list[str]:
+    """Return a new list of lines with the hold step spliced in. `position` is
+    'before' or 'after' the target step. Does not mutate `lines`."""
+    insert_at, label, dash_indent = _resolve_injection_point(jobs, job, step_index, position)
 
     newline = _detect_newline("".join(lines)) if lines else "\n"
     new_lines = list(lines)
@@ -476,8 +488,50 @@ def inject(lines: list[str], jobs: dict[str, JobInfo], job: str, step_index: int
     if insert_at == len(new_lines) and new_lines and not new_lines[-1].endswith(("\n", "\r")):
         new_lines[-1] = new_lines[-1] + newline
 
-    hold_lines = build_hold_lines(job, label, position, j.step_item_indent, newline)
+    hold_lines = build_hold_lines(job, label, position, dash_indent, newline)
     return new_lines[:insert_at] + hold_lines + new_lines[insert_at:]
+
+
+def inject_multi(
+    lines: list[str], jobs: dict[str, JobInfo], targets: list[tuple[str, int, str]]
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Splice in a hold step for every (job, step_index, position) in
+    `targets`, so a run can step through several breakpoints instead of
+    only ever supporting one. Each target is validated the same way a
+    single inject() call would be.
+
+    Splicing several steps in one pass means an insertion shifts the line
+    numbers every later target was computed against -- unless the inserts
+    happen from the bottom of the file up. An insertion only ever shifts
+    what comes AFTER it, so processing targets from the highest insertion
+    point down means every target still to be spliced (all of them lower in
+    the file) keeps the line number it was resolved against.
+
+    Returns (new_lines, hit_order): hit_order lists each target's resolved
+    (label, position), sorted into the order the running job will actually
+    reach them -- by file position, not necessarily the order `targets` was
+    given in (a job's steps run top to bottom regardless of the order its
+    breakpoints were passed on the command line).
+    """
+    if not targets:
+        raise ValueError("targets must be non-empty")
+
+    resolved = [(*_resolve_injection_point(jobs, job, idx, pos), job, pos) for job, idx, pos in targets]
+    # resolved[i] = (insert_at, label, dash_indent, job, position)
+
+    newline = _detect_newline("".join(lines)) if lines else "\n"
+    new_lines = list(lines)
+
+    order = sorted(range(len(resolved)), key=lambda i: resolved[i][0])
+    for i in reversed(order):
+        insert_at, label, dash_indent, job, position = resolved[i]
+        if insert_at == len(new_lines) and new_lines and not new_lines[-1].endswith(("\n", "\r")):
+            new_lines[-1] = new_lines[-1] + newline
+        hold_lines = build_hold_lines(job, label, position, dash_indent, newline)
+        new_lines = new_lines[:insert_at] + hold_lines + new_lines[insert_at:]
+
+    hit_order = [(resolved[i][1], resolved[i][4]) for i in order]
+    return new_lines, hit_order
 
 
 def read_workflow_text(path: str) -> tuple[str, bool]:
@@ -529,3 +583,17 @@ def inject_file(src_path: str, dest_path: str, job: str, step_index: int, positi
     new_lines = inject(lines, jobs, job, step_index, position)
     write_workflow_text(dest_path, "".join(new_lines), has_bom)
     return label
+
+
+def inject_multi_file(
+    src_path: str, dest_path: str, targets: list[tuple[str, int, str]]
+) -> list[tuple[str, str]]:
+    """Parse `src_path`, inject every target's hold step, write the result to
+    `dest_path`. Returns the resolved (label, position) list in hit order --
+    see inject_multi()."""
+    text, has_bom = read_workflow_text(src_path)
+    lines = text.splitlines(keepends=True)
+    jobs = parse_workflow(lines)
+    new_lines, hit_order = inject_multi(lines, jobs, targets)
+    write_workflow_text(dest_path, "".join(new_lines), has_bom)
+    return hit_order

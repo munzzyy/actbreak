@@ -90,14 +90,32 @@ those are the ones you have to select by position.
 
 | Flag | Meaning |
 |---|---|
-| `--break-before STEP` | pause immediately before `STEP` runs |
-| `--break-after STEP` | pause immediately after `STEP` runs, whether it passed or failed |
+| `--break-before STEP` | pause immediately before `STEP` runs (repeatable) |
+| `--break-after STEP` | pause immediately after `STEP` runs, whether it passed or failed (repeatable) |
 | `--break-on-failure` | if `act` exits nonzero, attach to the last job container for post-mortem |
 | `--job JOB` | disambiguate a multi-job workflow |
 | `--runtime {docker,podman,auto}` | container runtime to use (default: auto-detect) |
 | `--no-attach` | don't exec a shell automatically; print the attach command and hold |
+| `--shell SHELL` | shell to attach with, e.g. `zsh` or `'bash -l'` (default: try `sh`, then `bash`) |
 | `--act-arg ARG` | extra argument passed through to `act` (repeatable) |
 | `-v`, `--verbose` | print the injection/act commands being run |
+
+### Multiple breakpoints
+
+`--break-before` and `--break-after` are both repeatable and can be mixed, so
+one `run` can step through several points instead of you re-running it fresh
+for each one:
+
+```
+actbreak run ci.yml --break-before "Install deps" --break-after "Build"
+```
+
+They're hit in the order the job actually reaches them, which is by their
+position in the file, not the order you passed them on the command line.
+Attaching and exiting the shell (or running `actbreak resume` on a
+`--no-attach` session) moves you to the next one; once you resume past the
+last one the job runs to completion like normal. All of a run's breakpoints
+have to resolve to the same job, since `actbreak run` only ever debugs one.
 
 ### Parked sessions
 
@@ -111,17 +129,22 @@ status read from `docker ps` / `podman ps`:
 
 ```
 actbreak: 2 parked debug sessions:
-  act-CI-build [running] -- job 'build', step 'Run tests' (before) -- /repo/.github/workflows/ci.yml
-  act-CI-test [gone] -- job 'test', step 'Build' (after) -- /repo/.github/workflows/ci.yml
+  act-CI-build [running] -- job 'build', step 'Run tests' (before), held for 5m -- /repo/.github/workflows/ci.yml
+  act-CI-test [gone] -- job 'test', step 'Build' (after), held for 3h -- /repo/.github/workflows/ci.yml
 ```
 
 `running` is still held and attachable; `stopped` and `gone` are orphans to
-clear with `actbreak clean`. With nothing parked it just says so.
+clear with `actbreak clean`. The `held for` age is how long ago the session
+was parked, so you can spot the one that's been sitting for hours instead of
+minutes. With nothing parked it just says so.
 
 `actbreak resume` drops the hold and then waits for the job to finish, so it
 can reap the container instead of leaving a stopped one behind. That wait is
 the rest of your workflow, so it can sit there for a while. Ctrl-C stops
-waiting and leaves the job running; `actbreak clean` reaps it afterwards.
+waiting and leaves the job running; `actbreak clean` reaps it afterwards. A
+session parked from a multi-breakpoint `run --no-attach` instead re-parks at
+the next breakpoint if the job reaches it before finishing, so `resume` steps
+through them one at a time the same way attaching would.
 
 ### VS Code tasks
 
@@ -175,7 +198,9 @@ actbreak steps ci.yml
 actbreak run ci.yml --break-before "Run tests"
 actbreak run ci.yml --job build --break-before build:2
 actbreak run ci.yml --break-after "Build" --no-attach
+actbreak run ci.yml --break-before "Install deps" --break-after "Build"
 actbreak run ci.yml --break-on-failure
+actbreak run ci.yml --break-before "Run tests" --shell zsh
 ```
 
 ## How it works
@@ -205,6 +230,9 @@ actbreak run ci.yml --break-on-failure
 - The breakpoint step needs a real shell in the job container: it runs `sh`
   with `mkdir`, `printf`, and `sleep`. A `scratch` or distroless image without
   those won't hold at the breakpoint.
+- Attaching tries `sh`, then `bash`, unless `--shell` says otherwise. An image
+  that needs something else (`zsh`, or a login shell via `bash -l`) needs
+  `--shell` set explicitly.
 - `act --reuse` keeps the job container alive so you can attach to it. actbreak
   reaps that container once the run finishes cleanly (resumed to the end, the
   breakpoint never hit, or a `--break-on-failure` run that passed), so a normal

@@ -108,7 +108,14 @@ def _save_sessions(sessions: list[dict]) -> None:
 
 
 def _record_session(
-    container: Container, engine: str, tmpdir: str | None, workflow: Path, job: str, label: str, position: str
+    container: Container,
+    engine: str,
+    tmpdir: str | None,
+    workflow: Path,
+    job: str,
+    label: str,
+    position: str,
+    pending: list[tuple[str, str]] | None = None,
 ) -> None:
     sessions = _load_sessions()
     sessions.append(
@@ -121,6 +128,10 @@ def _record_session(
             "job": job,
             "label": label,
             "position": position,
+            # Breakpoints from the same multi-breakpoint run that are still
+            # ahead of this one, as [label, position] pairs -- lets `resume`
+            # step to the next one instead of running straight to completion.
+            "pending": [list(p) for p in pending] if pending else [],
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -146,7 +157,10 @@ def _build_act_command(act_bin: str, workflow_arg: str, job_name: str | None, ac
 
 
 def _attach_command_str(engine: str, container_name: str, shell: str = "sh") -> str:
-    return " ".join(shlex.quote(p) for p in (engine, "exec", "-it", container_name, shell))
+    # shell may itself be more than one word ('bash -l'), so split it before
+    # quoting -- otherwise the printed command comes out double-quoted and
+    # pasting it runs a lookup for a binary literally named 'bash -l'.
+    return " ".join(shlex.quote(p) for p in (engine, "exec", "-it", container_name, *shlex.split(shell)))
 
 
 def _match_run_containers(
@@ -227,6 +241,7 @@ def wait_for_breakpoint(
     workflow_hint: str | None,
     interrupt_check,
     timeout: float = DEFAULT_TIMEOUT,
+    shell: str = "sh",
 ) -> Container | None:
     """Poll until the job's container exists and has hit the hold, act exits
     first, or `timeout` elapses. Returns None if act exited before hitting it."""
@@ -250,7 +265,7 @@ def wait_for_breakpoint(
             # spell the attach commands out here where we do.
             message = str(e)
             if e.candidates:
-                commands = " or ".join(_attach_command_str(engine, n) for n in e.candidates)
+                commands = " or ".join(_attach_command_str(engine, n, shell) for n in e.candidates)
                 message = f"{message} Run: {commands}"
             raise SessionError(message) from e
         except ContainerNotFoundError:
@@ -262,7 +277,14 @@ def wait_for_breakpoint(
 
 
 def _post_mortem(
-    runner: CommandRunner, engine: str, job_name: str | None, jobs, workflow_hint: str | None, no_attach: bool, exit_code: int
+    runner: CommandRunner,
+    engine: str,
+    job_name: str | None,
+    jobs,
+    workflow_hint: str | None,
+    no_attach: bool,
+    exit_code: int,
+    shells: tuple[str, ...] = ("sh", "bash"),
 ) -> int:
     print(f"actbreak: act exited {exit_code}; looking for the job container for post-mortem", file=sys.stderr)
     containers = runner.ps(engine, all_containers=True)
@@ -278,14 +300,14 @@ def _post_mortem(
     if len(candidates) > 1:
         print("actbreak: multiple job containers are still alive; attach manually:", file=sys.stderr)
         for c in candidates:
-            print(f"  {_attach_command_str(engine, c.name)}", file=sys.stderr)
+            print(f"  {_attach_command_str(engine, c.name, shells[0])}", file=sys.stderr)
         return exit_code
 
     container = candidates[0]
     print(f"actbreak: post-mortem container: {container.name}")
-    print(f"actbreak: attach with: {_attach_command_str(engine, container.name)}")
+    print(f"actbreak: attach with: {_attach_command_str(engine, container.name, shells[0])}")
     if not no_attach:
-        runner.exec_interactive(engine, container.name)
+        runner.exec_interactive(engine, container.name, shells=shells)
         runner.rm_container(engine, container.name)
     return exit_code
 
@@ -297,23 +319,34 @@ def cmd_run(args) -> int:
     jobs = injector.parse_workflow(lines)
     workflow_hint = injector.extract_workflow_name(lines) or workflow_path.stem
 
-    breakpoint_requested = args.break_before is not None or args.break_after is not None
+    breakpoints = list(getattr(args, "breakpoints", None) or [])
+    breakpoint_requested = bool(breakpoints)
     job_name = args.job
-    label = None
-    position = None
     tmpdir = None
     act_workflow_arg = str(workflow_path)
+    shell = getattr(args, "shell", None)
+    shells = (shell,) if shell else ("sh", "bash")
 
+    # hold_sequence lists every breakpoint's (label, position) in the order
+    # the job will actually reach them -- see injector.inject_multi(). A
+    # single --break-before/--break-after still goes through this same path
+    # with a one-item sequence.
+    hold_sequence: list[tuple[str, str]] = []
     if breakpoint_requested:
-        selector = args.break_before if args.break_before is not None else args.break_after
-        position = "before" if args.break_before is not None else "after"
-        job_name, step_index = resolve_selector(jobs, selector, args.job)
+        targets = []
+        for position, selector in breakpoints:
+            hint = job_name if job_name is not None else args.job
+            resolved_job, step_index = resolve_selector(jobs, selector, hint)
+            if job_name is None:
+                job_name = resolved_job
+            targets.append((resolved_job, step_index, position))
         tmpdir = tempfile.mkdtemp(prefix="actbreak-")
         dest = str(Path(tmpdir) / workflow_path.name)
-        label = injector.inject_file(str(workflow_path), dest, job_name, step_index, position)
+        hold_sequence = injector.inject_multi_file(str(workflow_path), dest, targets)
         act_workflow_arg = dest
         if args.verbose:
-            print(f"actbreak: injected breakpoint {position} '{label}' -> {dest}", file=sys.stderr)
+            for label, position in hold_sequence:
+                print(f"actbreak: injected breakpoint {position} '{label}' -> {dest}", file=sys.stderr)
 
     act_bin = require_act()
     engine = detect_runtime(args.runtime)
@@ -341,30 +374,48 @@ def cmd_run(args) -> int:
     keep_tmpdir = False
     try:
         if breakpoint_requested:
-            container = wait_for_breakpoint(proc, runner, engine, job_name, workflow_hint, interrupt_check)
-            if container is None:
-                exit_code = proc.wait()
-            else:
-                print(f"actbreak: breakpoint hit -- job '{job_name}', step '{label}' ({position})")
+            # remaining tracks which of hold_sequence is still ahead: popped
+            # one at a time as each hold is actually reached, so a run with
+            # several breakpoints steps from one to the next in a single
+            # invocation instead of requiring a fresh `actbreak run` per stop.
+            remaining = list(hold_sequence)
+            exit_code = None
+            while True:
+                container = wait_for_breakpoint(
+                    proc, runner, engine, job_name, workflow_hint, interrupt_check, shell=shells[0]
+                )
+                if container is None:
+                    exit_code = proc.wait()
+                    break
+
+                label, position = remaining.pop(0)
+                total = len(hold_sequence)
+                hit_number = total - len(remaining)
+                step_word = f" ({hit_number}/{total})" if total > 1 else ""
+                print(f"actbreak: breakpoint hit{step_word} -- job '{job_name}', step '{label}' ({position})")
                 print(f"actbreak: container: {container.name}")
-                print(f"actbreak: attach with: {_attach_command_str(engine, container.name)}")
+                print(f"actbreak: attach with: {_attach_command_str(engine, container.name, shells[0])}")
                 if args.no_attach:
-                    _record_session(container, engine, tmpdir, workflow_path, job_name, label, position)
+                    _record_session(container, engine, tmpdir, workflow_path, job_name, label, position, remaining)
                     print(
                         "actbreak: --no-attach given; the container stays paused. "
                         "Run 'actbreak resume' to continue, or 'actbreak clean' to abort."
                     )
                     keep_tmpdir = True
                     return 0
-                runner.exec_interactive(engine, container.name)
+                runner.exec_interactive(engine, container.name, shells=shells)
                 runner.rm_file(engine, container.id, "/tmp/actbreak/hold")
+                if remaining:
+                    print("actbreak: resumed, waiting for the next breakpoint")
+                    continue
                 print("actbreak: resumed")
                 exit_code = proc.wait()
+                break
         else:
             exit_code = proc.wait()
 
         if args.break_on_failure and exit_code != 0:
-            exit_code = _post_mortem(runner, engine, job_name, jobs, workflow_hint, args.no_attach, exit_code)
+            exit_code = _post_mortem(runner, engine, job_name, jobs, workflow_hint, args.no_attach, exit_code, shells)
         else:
             # The job ran to completion (resumed through the hold, never hit
             # it, or a --break-on-failure run that passed). --reuse left its
@@ -399,13 +450,23 @@ def cmd_run(args) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _wait_and_reap(runner: CommandRunner, engine: str, container_id: str, timeout: float = DEFAULT_TIMEOUT) -> bool:
-    """After `resume` drops the hold, the job runs to the end and
-    `act --reuse` leaves its container stopped. Poll until it's no longer
-    running, then remove it by id -- rm by id works on a stopped container,
-    unlike the exec probe `clean`'s sweep uses. Returns True once it's gone,
-    False if it's still running when `timeout` elapses (the caller then keeps
-    the session so `clean` can reap it by id later)."""
+def _wait_and_reap(
+    runner: CommandRunner,
+    engine: str,
+    container_id: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    pending: list | None = None,
+) -> bool | str:
+    """After `resume` drops the hold, the job runs on. Poll until it's no
+    longer running, then remove it by id -- rm by id works on a stopped
+    container, unlike the exec probe `clean`'s sweep uses. Returns True once
+    it's gone, False if it's still running when `timeout` elapses (the caller
+    then keeps the session so `clean` can reap it by id later).
+
+    If `pending` is a non-empty list of the breakpoints still ahead (from a
+    multi-breakpoint run), also watches for the hold file reappearing --
+    meaning the job reached the next one instead of running to completion --
+    and returns the string 'hit' in that case, without reaping anything."""
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -417,6 +478,8 @@ def _wait_and_reap(runner: CommandRunner, engine: str, container_id: str, timeou
             return True  # act already removed it
         if not match.status.lower().startswith("up"):
             return runner.rm_container(engine, container_id)
+        if pending and runner.file_exists(engine, container_id, "/tmp/actbreak/hold"):
+            return "hit"
         if time.monotonic() >= deadline:
             return False
         time.sleep(POLL_INTERVAL)
@@ -440,6 +503,12 @@ def cmd_resume(args) -> int:
             # it stays resumable/cleanable instead of only recoverable
             # through `clean`'s stray-container sweep.
             unresolved.append(s)
+            # Written after every session, not once at the end: if we get
+            # interrupted (Ctrl-C, or a SIGTERM that skips straight past the
+            # except/finally below) while blocked on a later session, every
+            # session already resolved above stays resolved on disk instead
+            # of a stale, already-gone entry lingering in STATE_FILE.
+            _save_sessions(unresolved + sessions[i + 1 :])
             continue
         if not removed:
             # The hold couldn't be removed: the container isn't running (e.g.
@@ -453,8 +522,15 @@ def cmd_resume(args) -> int:
                 file=sys.stderr,
             )
             unresolved.append(s)
+            _save_sessions(unresolved + sessions[i + 1 :])
             continue
         print(f"actbreak: resumed {s['container_name']}")
+        # A session recorded from a multi-breakpoint run carries the
+        # breakpoints still ahead of the one just resumed; a job that reaches
+        # one of those before finishing hands back "hit" instead of running
+        # to completion, and we re-park at that breakpoint instead of
+        # treating the job as done.
+        pending = list(s.get("pending") or [])
         # The job now runs to completion and `act --reuse` leaves the container
         # stopped; wait for it and reap it so resume doesn't leak one. If it
         # outlives the wait, keep the record so `clean` can still get it.
@@ -465,7 +541,7 @@ def cmd_resume(args) -> int:
             f"(Ctrl-C to leave it running; 'actbreak clean' reaps it later)"
         )
         try:
-            finished = _wait_and_reap(runner, s["runtime"], s["container_id"])
+            result = _wait_and_reap(runner, s["runtime"], s["container_id"], pending=pending)
         except KeyboardInterrupt:
             # Ctrl-C means "stop watching", not "abort the job". Keep this
             # session and every one still queued behind it so they stay
@@ -478,11 +554,19 @@ def cmd_resume(args) -> int:
             unresolved.extend(sessions[i:])
             _save_sessions(unresolved)
             return 0
-        if finished:
+        if result == "hit":
+            next_label, next_position = pending[0]
+            print(f"actbreak: breakpoint hit -- step '{next_label}' ({next_position})")
+            print(f"actbreak: container: {s['container_name']}")
+            print(f"actbreak: attach with: {_attach_command_str(s['runtime'], s['container_name'])}")
+            print("actbreak: run 'actbreak resume' again to continue, or 'actbreak clean' to abort.")
+            s = dict(s, label=next_label, position=next_position, pending=pending[1:])
+            unresolved.append(s)
+        elif result:
             _cleanup_tmpdir(s.get("tmpdir"))
         else:
             unresolved.append(s)
-    _save_sessions(unresolved)
+        _save_sessions(unresolved + sessions[i + 1 :])
     return 0 if ok else 1
 
 

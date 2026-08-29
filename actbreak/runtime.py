@@ -13,6 +13,7 @@ real docker/podman binary.
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -184,10 +185,14 @@ class CommandRunner:
 
     def exec_interactive(self, engine: str, container: str, shells: tuple[str, ...] = ("sh", "bash")) -> int:
         """Attempt an interactive exec shell, trying each entry in `shells`
-        in turn (falling back on the shell-not-found exit codes 126/127)."""
+        in turn (falling back on the shell-not-found exit codes 126/127).
+        Each entry is split with shlex so a shell that needs an argument of
+        its own -- 'bash -l' for a container image that requires a login
+        shell -- runs as the shell plus that argument, not a lookup for a
+        binary literally named 'bash -l'."""
         returncode = 127
         for shell in shells:
-            result = self._run([engine, "exec", "-it", container, shell], check=False)
+            result = self._run([engine, "exec", "-it", container, *shlex.split(shell)], check=False)
             returncode = getattr(result, "returncode", 1)
             if returncode not in (126, 127):
                 return returncode

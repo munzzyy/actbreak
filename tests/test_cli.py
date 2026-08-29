@@ -16,21 +16,30 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             main(["run", "ci.yml"])
 
-    def test_break_before_and_break_after_are_mutually_exclusive(self):
+    def test_break_before_and_break_after_can_be_combined(self):
+        # No longer mutually exclusive: several breakpoints, mixed, is the
+        # whole point of stepping through more than one in one run.
         parser = build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["run", "ci.yml", "--break-before", "a", "--break-after", "b"])
+        args = parser.parse_args(["run", "ci.yml", "--break-before", "a", "--break-after", "b"])
+        self.assertEqual(args.breakpoints, [("before", "a"), ("after", "b")])
+
+    def test_break_before_and_break_after_are_repeatable_and_ordered(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ["run", "ci.yml", "--break-before", "a", "--break-after", "b", "--break-before", "c"]
+        )
+        self.assertEqual(args.breakpoints, [("before", "a"), ("after", "b"), ("before", "c")])
 
     def test_break_before_parses(self):
         parser = build_parser()
         args = parser.parse_args(["run", "ci.yml", "--break-before", "Run tests"])
         self.assertEqual(args.workflow, "ci.yml")
-        self.assertEqual(args.break_before, "Run tests")
-        self.assertIsNone(args.break_after)
+        self.assertEqual(args.breakpoints, [("before", "Run tests")])
         self.assertFalse(args.break_on_failure)
         self.assertIsNone(args.job)
         self.assertEqual(args.runtime, "auto")
         self.assertFalse(args.no_attach)
+        self.assertIsNone(args.shell)
         self.assertEqual(args.act_arg, [])
         self.assertFalse(args.verbose)
 
@@ -48,16 +57,19 @@ class ParserTests(unittest.TestCase):
                 "--runtime",
                 "podman",
                 "--no-attach",
+                "--shell",
+                "zsh",
                 "--act-arg=--pull=false",
                 "--act-arg=-P",
                 "-v",
             ]
         )
-        self.assertEqual(args.break_after, "build:2")
+        self.assertEqual(args.breakpoints, [("after", "build:2")])
         self.assertTrue(args.break_on_failure)
         self.assertEqual(args.job, "build")
         self.assertEqual(args.runtime, "podman")
         self.assertTrue(args.no_attach)
+        self.assertEqual(args.shell, "zsh")
         self.assertEqual(args.act_arg, ["--pull=false", "-P"])
         self.assertTrue(args.verbose)
 
@@ -86,7 +98,7 @@ class ParserTests(unittest.TestCase):
         self.assertIn("_actbreak() {", out)
         for token in ("run", "resume", "clean", "init-vscode", "--version", "--completions",
                       "--break-before", "--break-after", "--break-on-failure",
-                      "--job", "--runtime", "--no-attach", "--act-arg",
+                      "--job", "--runtime", "--no-attach", "--shell", "--act-arg",
                       "-v", "--verbose"):
             self.assertIn(token, out)
 
@@ -94,9 +106,9 @@ class ParserTests(unittest.TestCase):
         out = self._completions("zsh")
         self.assertIn("#compdef actbreak", out)
         for token in ('"run"', '"resume"', '"clean"', '"init-vscode"',
-                      "'--version[", "'--completions[", "'--break-before[",
-                      "'--break-after[", "'--break-on-failure[", "'--job[",
-                      "'--runtime[", "'--no-attach[", "--act-arg[", "'-v[",
+                      "'--version[", "'--completions[", "'*--break-before[",
+                      "'*--break-after[", "'--break-on-failure[", "'--job[",
+                      "'--runtime[", "'--no-attach[", "'--shell[", "--act-arg[", "'-v[",
                       "'--verbose["):
             self.assertIn(token, out)
 
@@ -113,7 +125,7 @@ class ParserTests(unittest.TestCase):
         out = self._completions("zsh")
         # A value-taking flag needs a `:metavar:` tail or zsh offers the next
         # flag where the value belongs.
-        self.assertIn("'--break-before[pause immediately before STEP runs", out)
+        self.assertIn("'*--break-before[pause immediately before STEP runs", out)
         self.assertIn("]:STEP:'", out)
         self.assertIn("]:JOB:'", out)
         # Choices become a completable value list.

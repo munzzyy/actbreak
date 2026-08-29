@@ -301,12 +301,12 @@ class WaitForBreakpointTests(unittest.TestCase):
 def _run_args(**overrides):
     defaults = dict(
         workflow="ci.yml",
-        break_before="Run tests",
-        break_after=None,
+        breakpoints=[("before", "Run tests")],
         break_on_failure=False,
         job=None,
         runtime="auto",
         no_attach=False,
+        shell=None,
         act_arg=[],
         verbose=False,
     )
@@ -433,6 +433,82 @@ class CmdRunCleanupTests(unittest.TestCase):
         )
         self.assertIn("act-CI-build", container_rm[0])
 
+    def test_multiple_breakpoints_step_through_in_one_run(self):
+        # Two breakpoints ("before" and "after" the same step, so a single
+        # existing fixture step is enough) must both be waited on, attached
+        # to, and resumed in one cmd_run call -- not just the first one.
+        popen = FakePopen(running=True, exit_code=0)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout=ONE_MATCH_PS), "test -f": FakeResult(returncode=0)}
+        )
+        hits = [Container(id="c1", name="act-CI-build"), Container(id="c1", name="act-CI-build")]
+
+        def fake_wait(*a, **kw):
+            return hits.pop(0)
+
+        patchers = self._patched(popen, fake_run, fake_wait)
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow),
+                breakpoints=[("before", "Run tests"), ("after", "Run tests")],
+            )
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(hits, [], "wait_for_breakpoint must be called once per breakpoint")
+        attach_calls = [c for c in fake_run.calls if "-it" in c]
+        self.assertEqual(len(attach_calls), 2, f"expected an attach per breakpoint, got: {fake_run.calls}")
+
+    def test_no_attach_with_multiple_breakpoints_parks_at_the_first_with_the_rest_pending(self):
+        popen = FakePopen(running=True)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout=ONE_MATCH_PS), "test -f": FakeResult(returncode=0)}
+        )
+
+        def fake_wait(*a, **kw):
+            return Container(id="c1", name="act-CI-build")
+
+        state_dir = Path(self.tmp.name) / ".actbreak"
+        patchers = self._patched(popen, fake_run, fake_wait) + (
+            mock.patch.object(session, "STATE_DIR", state_dir),
+            mock.patch.object(session, "STATE_FILE", state_dir / "state.json"),
+        )
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow),
+                breakpoints=[("before", "Run tests"), ("after", "Run tests")],
+                no_attach=True,
+            )
+            rc = session.cmd_run(args)
+        self.assertEqual(rc, 0)
+        sessions = json.loads((state_dir / "state.json").read_text())["sessions"]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["label"], "Run tests")
+        self.assertEqual(sessions[0]["position"], "before")
+        self.assertEqual(sessions[0]["pending"], [["Run tests", "after"]])
+        # Only the first breakpoint was ever waited for -- --no-attach stops
+        # there, exactly like a single-breakpoint run always has.
+        attach_calls = [c for c in fake_run.calls if "-it" in c]
+        self.assertEqual(attach_calls, [])
+
+    def test_breakpoints_spanning_two_jobs_are_rejected(self):
+        # actbreak run scopes a single act invocation to one job (`-j`); a
+        # breakpoint sequence that resolves to more than one job can never
+        # actually be reached, so it must fail fast with a clear error
+        # instead of quietly debugging the wrong job.
+        multi = self.repo_root / ".github" / "workflows" / "multi.yml"
+        multi.write_text(
+            "name: Build and Test\non: push\njobs:\n"
+            "  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Lint\n        run: ruff check .\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - name: Upload artifact\n        run: echo up\n"
+        )
+        args = _run_args(
+            workflow=str(multi),
+            breakpoints=[("before", "Lint"), ("before", "Upload artifact")],
+        )
+        with self.assertRaises(SelectorError):
+            session.cmd_run(args)
+
     def test_break_on_failure_success_reaps_container_without_a_job_flag(self):
         # The exact command from the field report: `actbreak run ci.yml
         # --break-on-failure` with no -j. The job passes, so no post-mortem
@@ -443,7 +519,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         with _patch_all(patchers):
             args = _run_args(
                 workflow=str(self.workflow),
-                break_before=None,
+                breakpoints=[],
                 break_on_failure=True,
                 job=None,
             )
@@ -464,7 +540,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         patchers = self._patched(popen, fake_run, lambda *a, **k: None)
         with _patch_all(patchers):
             args = _run_args(
-                workflow=str(self.workflow), break_before=None, break_on_failure=True, job=None
+                workflow=str(self.workflow), breakpoints=[], break_on_failure=True, job=None
             )
             rc = session.cmd_run(args)
         self.assertEqual(rc, 0)
@@ -482,7 +558,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         patchers = self._patched(popen, fake_run, lambda *a, **k: None)
         with _patch_all(patchers):
             args = _run_args(
-                workflow=str(self.workflow), break_before=None, break_on_failure=True, job=None
+                workflow=str(self.workflow), breakpoints=[], break_on_failure=True, job=None
             )
             rc = session.cmd_run(args)
         self.assertEqual(rc, 1)
@@ -507,7 +583,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         )
         patchers = self._patched(popen, fake_run, lambda *a, **k: None)
         with _patch_all(patchers):
-            args = _run_args(workflow=str(two), break_before=None, break_on_failure=True, job=None)
+            args = _run_args(workflow=str(two), breakpoints=[], break_on_failure=True, job=None)
             rc = session.cmd_run(args)
         self.assertEqual(rc, 0)
         removed = {c[-1] for c in fake_run.calls if c[:2] == ["docker", "rm"]}
@@ -537,7 +613,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         patchers = self._patched(popen, fake_run, lambda *a, **k: None)
         with _patch_all(patchers):
             args = _run_args(
-                workflow=str(self.workflow), break_before=None, break_on_failure=True, job=None
+                workflow=str(self.workflow), breakpoints=[], break_on_failure=True, job=None
             )
             rc = session.cmd_run(args)
         self.assertEqual(rc, 130)
@@ -665,6 +741,70 @@ class CmdResumeTests(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["container_id"], "c1")
 
+    def test_progress_is_saved_after_each_session_not_only_at_the_end(self):
+        # If the process dies while blocked resolving session N (a SIGTERM,
+        # say, which skips straight past every except/finally in cmd_resume),
+        # sessions 1..N-1 that already finished must already be off disk --
+        # not still listed, which used to make a later resume try (and fail)
+        # to resume an already-gone container.
+        first = {"runtime": "docker", "container_id": "c1", "container_name": "act-CI-a", "tmpdir": None}
+        second = {"runtime": "docker", "container_id": "c2", "container_name": "act-CI-b", "tmpdir": None}
+        self._seed([first, second])
+        fake_run = FakeRunFn(default=FakeResult(returncode=0))
+
+        calls = {"n": 0}
+
+        def fake_wait_and_reap(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return True  # session 1 finishes cleanly
+            raise RuntimeError("killed mid-wait")  # simulates an external kill on session 2
+
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session, "_wait_and_reap", side_effect=fake_wait_and_reap):
+                with self.assertRaises(RuntimeError):
+                    session.cmd_resume(None)
+
+        # Session 1 must already be gone from disk even though the whole
+        # call never returned normally.
+        remaining_ids = [s["container_id"] for s in session._load_sessions()]
+        self.assertNotIn("c1", remaining_ids)
+        self.assertIn("c2", remaining_ids)
+
+    def test_resume_hits_the_next_breakpoint_and_reparks_instead_of_finishing(self):
+        # A session recorded by a multi-breakpoint run carries the ones still
+        # ahead; if the job reaches the next hold before finishing, resume
+        # must re-park at it rather than declare the job done.
+        self._seed(
+            [
+                {
+                    "runtime": "docker",
+                    "container_id": "c1",
+                    "container_name": "act-CI-build",
+                    "tmpdir": None,
+                    "label": "Install deps",
+                    "position": "before",
+                    "pending": [["Run tests", "after"]],
+                }
+            ]
+        )
+        fake_run = FakeRunFn(default=FakeResult(returncode=0))
+        buf = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session, "_wait_and_reap", return_value="hit"):
+                with contextlib.redirect_stdout(buf):
+                    rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("breakpoint hit -- step 'Run tests' (after)", out)
+        remaining = session._load_sessions()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["label"], "Run tests")
+        self.assertEqual(remaining[0]["position"], "after")
+        self.assertEqual(remaining[0]["pending"], [])
+        # It's still held, not reaped.
+        self.assertEqual([c for c in fake_run.calls if c[:2] == ["docker", "rm"]], [])
+
     def test_wait_and_reap_gives_up_on_a_container_that_never_stops(self):
         # The wait is bounded so `resume` can't block forever on a job that
         # hangs; giving up returns False and the caller keeps the session.
@@ -684,6 +824,28 @@ class CmdResumeTests(unittest.TestCase):
         with mock.patch.object(session, "POLL_INTERVAL", 0):
             result = session._wait_and_reap(runner, "docker", "c1", timeout=0)
         self.assertTrue(result)
+
+    def test_wait_and_reap_reports_hit_when_the_next_hold_appears(self):
+        # Container is still "Up" (the job didn't finish) but the hold file
+        # is back -- it reached the next breakpoint in the sequence.
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\n"), "test -f": FakeResult(returncode=0)}
+        )
+        runner = CommandRunner(run=fake_run)
+        result = session._wait_and_reap(runner, "docker", "c1", timeout=5, pending=[("next", "before")])
+        self.assertEqual(result, "hit")
+
+    def test_wait_and_reap_ignores_the_hold_file_when_nothing_is_pending(self):
+        # Regression guard: without `pending`, behavior must be exactly the
+        # old one -- never even check for the hold file.
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\n"), "test -f": FakeResult(returncode=0)}
+        )
+        runner = CommandRunner(run=fake_run)
+        with mock.patch.object(session, "POLL_INTERVAL", 0):
+            result = session._wait_and_reap(runner, "docker", "c1", timeout=0)
+        self.assertFalse(result)
+        self.assertFalse(any("test" in c for c in fake_run.calls))
 
     def test_resume_says_it_is_waiting_before_it_blocks(self):
         # Without this line the command prints "resumed X" and then sits
