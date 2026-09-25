@@ -1,7 +1,7 @@
 # actbreak
 
 [![CI](https://github.com/munzzyy/actbreak/actions/workflows/ci.yml/badge.svg)](https://github.com/munzzyy/actbreak/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 
 actbreak is a local breakpoint debugger for GitHub Actions: pause a workflow mid-step
@@ -36,7 +36,7 @@ pip install -e .
 
 Don't install actbreak from PyPI yet. The listing there is stuck at 0.1.0,
 which predates `actbreak list`, `actbreak steps`, `init-vscode`, and shell
-completions, and it still carries the old Prosperity license instead of MIT.
+completions, and it still carries the old Prosperity license.
 The 0.2.0 publish failed and hasn't been retried, so install from git until
 the PyPI page says 0.2.0.
 
@@ -264,7 +264,7 @@ PATH, which in practice means it only runs in CI.
 
 ## License
 
-MIT. Free to use, change, and ship, commercial or not. See [LICENSE](LICENSE).
+[GPL-3.0-or-later](LICENSE). You can use, study, change and share it. If you distribute a copy or a modified version, it has to stay under the GPL and come with its source. Releases up to v0.2.0 were under MIT.
 
 ## Support
 
