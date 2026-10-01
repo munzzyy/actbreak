@@ -229,7 +229,8 @@ class CommandRunnerTests(unittest.TestCase):
     def test_exec_interactive_falls_back_from_sh_to_bash(self):
         fake = FakeRunner(
             {
-                "exec -it c1 sh": FakeResult(returncode=127),
+                "exec c1 sh -c :": FakeResult(returncode=127),
+                "exec c1 bash -c :": FakeResult(returncode=0),
                 "exec -it c1 bash": FakeResult(returncode=0),
             }
         )
@@ -238,8 +239,42 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(
             fake.calls,
-            [["docker", "exec", "-it", "c1", "sh"], ["docker", "exec", "-it", "c1", "bash"]],
+            [
+                ["docker", "exec", "c1", "sh", "-c", ":"],
+                ["docker", "exec", "c1", "bash", "-c", ":"],
+                ["docker", "exec", "-it", "c1", "bash"],
+            ],
         )
+
+    def test_exec_interactive_does_not_open_a_second_shell_when_the_session_exits_127(self):
+        # sh exits 127 after a mistyped command; that's the user's session
+        # ending, not sh being missing.
+        fake = FakeRunner(
+            {
+                "exec c1 sh -c :": FakeResult(returncode=0),
+                "exec -it c1 sh": FakeResult(returncode=127),
+            }
+        )
+        runner = CommandRunner(run=fake)
+        rc = runner.exec_interactive("docker", "c1")
+        self.assertEqual(rc, 127)
+        self.assertEqual([c for c in fake.calls if "-it" in c], [["docker", "exec", "-it", "c1", "sh"]])
+
+    def test_exec_interactive_probes_a_shell_with_its_own_argument(self):
+        fake = FakeRunner({"exec c1 bash -l -c :": FakeResult(returncode=0)})
+        runner = CommandRunner(run=fake)
+        runner.exec_interactive("docker", "c1", shells=("bash -l", "sh"))
+        self.assertEqual(
+            fake.calls,
+            [["docker", "exec", "c1", "bash", "-l", "-c", ":"], ["docker", "exec", "-it", "c1", "bash", "-l"]],
+        )
+
+    def test_exec_interactive_with_no_shell_installed_attaches_once_to_show_the_error(self):
+        fake = FakeRunner(default=FakeResult(returncode=127))
+        runner = CommandRunner(run=fake)
+        rc = runner.exec_interactive("docker", "c1")
+        self.assertEqual(rc, 127)
+        self.assertEqual([c for c in fake.calls if "-it" in c], [["docker", "exec", "-it", "c1", "bash"]])
 
     def test_exec_interactive_honors_a_custom_shell(self):
         fake = FakeRunner({"exec -it c1 zsh": FakeResult(returncode=0)})
@@ -262,7 +297,10 @@ class CommandRunnerTests(unittest.TestCase):
         runner = CommandRunner(run=fake)
         rc = runner.exec_interactive("docker", "c1")
         self.assertEqual(rc, 1)
-        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(
+            fake.calls,
+            [["docker", "exec", "c1", "sh", "-c", ":"], ["docker", "exec", "-it", "c1", "sh"]],
+        )
 
     def test_rm_container_passes_force_flag(self):
         fake = FakeRunner()

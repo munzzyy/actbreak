@@ -188,19 +188,31 @@ class CommandRunner:
         return getattr(result, "returncode", 1) == 0
 
     def exec_interactive(self, engine: str, container: str, shells: tuple[str, ...] = ("sh", "bash")) -> int:
-        """Attempt an interactive exec shell, trying each entry in `shells`
-        in turn (falling back on the shell-not-found exit codes 126/127).
-        Each entry is split with shlex so a shell that needs an argument of
-        its own -- 'bash -l' for a container image that requires a login
-        shell -- runs as the shell plus that argument, not a lookup for a
-        binary literally named 'bash -l'."""
-        returncode = 127
+        """Open an interactive shell in the container: the first entry in
+        `shells` the container actually has. Each entry is split with shlex
+        so a shell that needs an argument of its own -- 'bash -l' for an
+        image that requires a login shell -- runs as the shell plus that
+        argument, not a lookup for a binary literally named 'bash -l'.
+
+        With more than one candidate, each is probed first with a
+        non-interactive `<shell> -c :`, and only a 126/127 from the probe
+        moves on to the next. The interactive session's own exit code can't
+        be used for that: sh also exits 127 when the user mistypes a command
+        and then exits, which used to open a second shell."""
+        if len(shells) == 1:
+            return self._exec_tty(engine, container, shells[0])
         for shell in shells:
-            result = self._run([engine, "exec", "-it", container, *shlex.split(shell)], check=False)
-            returncode = getattr(result, "returncode", 1)
-            if returncode not in (126, 127):
-                return returncode
-        return returncode
+            probe = self._run([engine, "exec", container, *shlex.split(shell), "-c", ":"],
+                              capture_output=True, text=True, check=False)
+            if getattr(probe, "returncode", 1) not in (126, 127):
+                return self._exec_tty(engine, container, shell)
+        # None of them is installed. Run the last one anyway so the engine's
+        # own "not found" error reaches the terminal instead of nothing.
+        return self._exec_tty(engine, container, shells[-1])
+
+    def _exec_tty(self, engine: str, container: str, shell: str) -> int:
+        result = self._run([engine, "exec", "-it", container, *shlex.split(shell)], check=False)
+        return getattr(result, "returncode", 1)
 
     def rm_container(self, engine: str, container: str, force: bool = True) -> bool:
         # Returns whether the container was actually removed, so clean doesn't
