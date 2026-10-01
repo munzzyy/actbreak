@@ -531,68 +531,88 @@ def _wait_and_reap(
         time.sleep(POLL_INTERVAL)
 
 
+def _select_sessions(sessions: list[dict], query: str | None) -> list[int]:
+    """Indices of the sessions `query` names: every session when it's None,
+    otherwise the one whose container name or id is `query`, or failing
+    that the one it's a unique prefix of."""
+    if query is None:
+        return list(range(len(sessions)))
+
+    def keys(s: dict) -> list[str]:
+        return [k for k in (s.get("container_name"), s.get("container_id")) if k]
+
+    matches = [i for i, s in enumerate(sessions) if query in keys(s)]
+    if not matches:
+        matches = [i for i, s in enumerate(sessions) if any(k.startswith(query) for k in keys(s))]
+    if len(matches) == 1:
+        return matches
+
+    def label(i: int) -> str:
+        return sessions[i].get("container_name") or sessions[i].get("container_id") or "?"
+
+    if not matches:
+        parked = ", ".join(label(i) for i in range(len(sessions))) or "none"
+        raise SessionError(f"no parked session matches '{query}' (parked: {parked})")
+    raise SessionError(
+        f"'{query}' matches {len(matches)} parked sessions: {', '.join(label(i) for i in matches)}; "
+        "give more of the container name"
+    )
+
+
 def cmd_resume(args) -> int:
     sessions = _load_sessions()
     if not sessions:
         print("actbreak: no held sessions to resume", file=sys.stderr)
         return 1
-    # A post-mortem container has no hold to drop: act already exited. Leave
-    # it for `clean` and say so, rather than touching it.
-    unresolved = [s for s in sessions if s.get("post_mortem")]
-    sessions = [s for s in sessions if not s.get("post_mortem")]
-    for s in unresolved:
-        print(
-            f"actbreak: nothing to resume in {s.get('container_name', '?')}: it's a post-mortem "
-            "container and act has already exited. Run 'actbreak clean' to remove it.",
-            file=sys.stderr,
-        )
-    if not sessions:
+    picked = _select_sessions(sessions, getattr(args, "session", None))
+    # What goes back to disk: None marks a session that's finished. Saved
+    # after every session, not once at the end, so an interrupt (Ctrl-C, or
+    # a SIGTERM that skips every except/finally) while blocked on a later one
+    # never leaves an already-gone entry behind in STATE_FILE.
+    slots: list[dict | None] = list(sessions)
+
+    def save() -> None:
+        _save_sessions([s for s in slots if s is not None])
+
+    todo = []
+    for i in picked:
+        s = sessions[i]
+        if s.get("post_mortem"):
+            # No hold to drop in a post-mortem container: act already exited.
+            print(
+                f"actbreak: nothing to resume in {s.get('container_name', '?')}: it's a post-mortem "
+                "container and act has already exited. Run 'actbreak clean' to remove it.",
+                file=sys.stderr,
+            )
+        else:
+            todo.append(i)
+    if not todo:
         return 1
+
     runner = CommandRunner()
     ok = True
-    for i, s in enumerate(sessions):
+    for i in todo:
+        s = sessions[i]
         try:
             removed = runner.rm_file(s["runtime"], s["container_id"], "/tmp/actbreak/hold")
         except Exception as e:  # defensive: a bad/stale session entry shouldn't block the rest
             ok = False
             print(f"actbreak: failed to resume {s.get('container_name', '?')}: {e}", file=sys.stderr)
-            # Its container is presumably still held -- keep the record so
-            # it stays resumable/cleanable instead of only recoverable
-            # through `clean`'s stray-container sweep.
-            unresolved.append(s)
-            # Written after every session, not once at the end: if we get
-            # interrupted (Ctrl-C, or a SIGTERM that skips straight past the
-            # except/finally below) while blocked on a later session, every
-            # session already resolved above stays resolved on disk instead
-            # of a stale, already-gone entry lingering in STATE_FILE.
-            _save_sessions(unresolved + sessions[i + 1 :])
             continue
         if not removed:
-            # The hold couldn't be removed: the container isn't running (e.g.
-            # it stopped across a reboot), so there's nothing to resume into.
-            # Keep the record -- `clean` reaps it by id -- instead of falsely
-            # reporting success and dropping it into an unrecoverable orphan.
+            # The container isn't running (it stopped across a reboot, say),
+            # so there's nothing to resume into. Keep the record for `clean`.
             ok = False
             print(
                 f"actbreak: could not resume {s.get('container_name', '?')}: its container "
                 "isn't running. Run 'actbreak clean' to remove it.",
                 file=sys.stderr,
             )
-            unresolved.append(s)
-            _save_sessions(unresolved + sessions[i + 1 :])
             continue
         print(f"actbreak: resumed {s['container_name']}")
-        # A session recorded from a multi-breakpoint run carries the
-        # breakpoints still ahead of the one just resumed; a job that reaches
-        # one of those before finishing hands back "hit" instead of running
-        # to completion, and we re-park at that breakpoint instead of
-        # treating the job as done.
+        # Breakpoints still ahead from a multi-breakpoint run: if the job
+        # reaches one before finishing, re-park there instead of reaping.
         pending = list(s.get("pending") or [])
-        # The job now runs to completion and `act --reuse` leaves the container
-        # stopped; wait for it and reap it so resume doesn't leak one. If it
-        # outlives the wait, keep the record so `clean` can still get it.
-        # Say that we're waiting: the rest of the workflow can take a while
-        # and without this the command just sits there looking hung.
         print(
             f"actbreak: waiting for {s['container_name']} to finish "
             f"(Ctrl-C to leave it running; 'actbreak clean' reaps it later)"
@@ -600,16 +620,14 @@ def cmd_resume(args) -> int:
         try:
             result = _wait_and_reap(runner, s["runtime"], s["container_id"], pending=pending)
         except KeyboardInterrupt:
-            # Ctrl-C means "stop watching", not "abort the job". Keep this
-            # session and every one still queued behind it so they stay
-            # resumable and cleanable.
+            # "Stop watching", not "abort the job": this session and every one
+            # queued behind it stay resumable and cleanable.
             print(
                 "\nactbreak: stopped waiting; the job is still running. "
                 "Run 'actbreak clean' once it's done.",
                 file=sys.stderr,
             )
-            unresolved.extend(sessions[i:])
-            _save_sessions(unresolved)
+            save()
             return 0
         if result == "hit":
             next_label, next_position = pending[0]
@@ -618,24 +636,22 @@ def cmd_resume(args) -> int:
             attach = _attach_command_str(s["runtime"], s["container_name"], s.get("shell") or "sh")
             print(f"actbreak: attach with: {attach}")
             print("actbreak: run 'actbreak resume' again to continue, or 'actbreak clean' to abort.")
-            s = dict(s, label=next_label, position=next_position, pending=pending[1:])
-            unresolved.append(s)
+            slots[i] = dict(s, label=next_label, position=next_position, pending=pending[1:])
         elif result == "timeout":
             print(
                 f"actbreak: gave up waiting for {s['container_name']} after {int(DEFAULT_TIMEOUT // 60)} minutes; "
                 "the job is still running. Run 'actbreak clean' once it's done.",
                 file=sys.stderr,
             )
-            unresolved.append(s)
         elif result:
             _cleanup_tmpdir(s.get("tmpdir"))
+            slots[i] = None
         else:
             print(
                 f"actbreak: couldn't reap {s['container_name']}; run 'actbreak clean' to remove it.",
                 file=sys.stderr,
             )
-            unresolved.append(s)
-        _save_sessions(unresolved + sessions[i + 1 :])
+        save()
     return 0 if ok else 1
 
 
@@ -651,10 +667,15 @@ def _container_gone(runner: CommandRunner, engine: str, container_id: str) -> bo
 
 def cmd_clean(args) -> int:
     sessions = _load_sessions()
+    query = getattr(args, "session", None)
+    picked = set(_select_sessions(sessions, query))
     runner = CommandRunner()
     ok = True
     kept = []
-    for s in sessions:
+    for i, s in enumerate(sessions):
+        if i not in picked:
+            kept.append(s)
+            continue
         name = s.get("container_name", s.get("container_id", "?"))
         try:
             removed = runner.rm_container(s["runtime"], s["container_id"])
@@ -673,6 +694,9 @@ def cmd_clean(args) -> int:
             continue
         _cleanup_tmpdir(s.get("tmpdir"))
     _save_sessions(kept)
+    if query is not None:
+        # The sweep would also take every other parked session's container.
+        return 0 if ok else 1
 
     # Best-effort sweep for stray act-* containers we lost track of (e.g. the
     # state file was deleted, or actbreak crashed before recording a session).

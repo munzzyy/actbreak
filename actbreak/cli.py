@@ -21,6 +21,7 @@ examples:
   actbreak run ci.yml --break-before Test --matrix os:ubuntu-latest
   actbreak steps ci.yml
   actbreak resume
+  actbreak resume act-CI-build
   actbreak clean
   actbreak list
   actbreak init-vscode
@@ -181,8 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument("-v", "--verbose", action="store_true", help="print the act/injection commands being run")
 
-    sub.add_parser("resume", help="release an active breakpoint hold")
-    sub.add_parser("clean", help="kill leftover held containers and temp dirs")
+    session_help = (
+        "a parked session's container name, or a unique prefix of it, as 'actbreak list' "
+        "prints it (default: every parked session)"
+    )
+    resume_p = sub.add_parser("resume", help="release an active breakpoint hold")
+    resume_p.add_argument("session", nargs="?", metavar="SESSION", help=session_help)
+    clean_p = sub.add_parser("clean", help="kill leftover held containers and temp dirs")
+    clean_p.add_argument("session", nargs="?", metavar="SESSION", help=session_help)
     sub.add_parser(
         "list",
         help="show parked debug sessions and each one's container status",

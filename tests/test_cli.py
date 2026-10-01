@@ -194,10 +194,20 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args([])
 
-    def test_resume_and_clean_take_no_positional_args(self):
+    def test_resume_and_clean_take_an_optional_session(self):
         parser = build_parser()
-        self.assertEqual(parser.parse_args(["resume"]).command, "resume")
-        self.assertEqual(parser.parse_args(["clean"]).command, "clean")
+        for command in ("resume", "clean"):
+            with self.subTest(command=command):
+                self.assertIsNone(parser.parse_args([command]).session)
+                self.assertEqual(parser.parse_args([command, "act-CI-build"]).session, "act-CI-build")
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        parser.parse_args([command, "a", "b"])
+
+    def test_completions_do_not_offer_files_for_a_session(self):
+        out = self._completions("zsh")
+        self.assertIn("'::SESSION: '", out)
+        self.assertEqual(out.count(":_files'"), 2, "only run and steps take a workflow path")
 
     def test_init_vscode_takes_no_positional_args(self):
         parser = build_parser()

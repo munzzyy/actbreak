@@ -128,11 +128,14 @@ def _zsh_flag_specs(action: argparse.Action) -> list[str]:
 
 
 def _zsh_positional_specs(parser: argparse.ArgumentParser) -> list[str]:
-    """Complete a subcommand's positional arguments as filenames. Both
-    commands that take one (`run`, `steps`) take a workflow path."""
+    """A workflow path completes as a filename. Anything else (the optional
+    SESSION of resume/clean) shows its name but offers no completions, which
+    is what a lone space as the _arguments action means."""
     specs = []
     for action in _positional_actions(parser):
-        specs.append(f"':{action.dest}:_files'")
+        optional = ":" if action.nargs == "?" else ""
+        completer = "_files" if action.dest == "workflow" else " "
+        specs.append(f"'{optional}:{action.metavar or action.dest}:{completer}'")
     return specs
 
 

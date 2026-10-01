@@ -55,8 +55,8 @@ actbreak run <workflow.yml> --break-on-failure
 
 actbreak steps <workflow.yml>
 
-actbreak resume
-actbreak clean
+actbreak resume [SESSION]
+actbreak clean [SESSION]
 actbreak list
 
 actbreak init-vscode
@@ -153,6 +153,19 @@ to drop, so `resume` leaves it alone and `clean` removes it.
 removal fails, it keeps that session, says so, and exits 1, so the next
 `clean` can try again. A session whose container is already gone is just
 dropped.
+
+With several sessions parked, `resume` and `clean` act on all of them by
+default. Name one to act on just that session: its container name as `list`
+prints it, or any prefix of it that only one session has.
+
+```
+actbreak resume act-CI-test
+actbreak clean act-CI-b
+```
+
+A prefix that matches more than one session, or none, is an error that lists
+what is parked. `clean` with a name skips its sweep for untracked
+containers, since that sweep would take the other parked sessions too.
 
 `actbreak resume` drops the hold and then waits for the job to finish, so it
 can reap the container instead of leaving a stopped one behind. That wait is

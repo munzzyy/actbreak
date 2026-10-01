@@ -1183,6 +1183,96 @@ class CmdResumeTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# resume/clean SESSION
+# ---------------------------------------------------------------------------
+
+
+class TargetOneSessionTests(unittest.TestCase):
+    BUILD = {"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}
+    TEST = {"runtime": "docker", "container_id": "c2", "container_name": "act-CI-test", "tmpdir": None}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        state_dir = Path(self.tmp.name) / ".actbreak"
+        for p in (mock.patch.object(session, "STATE_DIR", state_dir),
+                  mock.patch.object(session, "STATE_FILE", state_dir / "state.json")):
+            p.start()
+            self.addCleanup(p.stop)
+        session._save_sessions([dict(self.BUILD), dict(self.TEST)])
+        self.fake_run = FakeRunFn(default=FakeResult(returncode=0))
+        p = mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=self.fake_run))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _quiet(self, fn, query):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return fn(SimpleNamespace(session=query))
+
+    def test_resume_by_name_only_touches_that_container(self):
+        with mock.patch.object(session, "_wait_and_reap", return_value=True) as wait:
+            rc = self._quiet(session.cmd_resume, "act-CI-test")
+        self.assertEqual(rc, 0)
+        self.assertEqual([c.args[2] for c in wait.call_args_list], ["c2"])
+        self.assertTrue(all("c1" not in call for call in self.fake_run.calls), self.fake_run.calls)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1"])
+
+    def test_resume_by_unique_prefix(self):
+        with mock.patch.object(session, "_wait_and_reap", return_value=True):
+            rc = self._quiet(session.cmd_resume, "act-CI-t")
+        self.assertEqual(rc, 0)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1"])
+
+    def test_resume_by_container_id(self):
+        with mock.patch.object(session, "_wait_and_reap", return_value=True):
+            self._quiet(session.cmd_resume, "c1")
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c2"])
+
+    def test_clean_by_name_removes_only_that_session(self):
+        # Both containers still hold the hold file, so the stray sweep would
+        # take c2 too if it ran.
+        self.fake_run.responses["ps"] = FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\nc2\tact-CI-test\tUp 1 minute\n")
+        with mock.patch.object(session.shutil, "which", return_value="/usr/bin/docker"):
+            rc = self._quiet(session.cmd_clean, "act-CI-build")
+        self.assertEqual(rc, 0)
+        removed = [c for c in self.fake_run.calls if c[:2] == ["docker", "rm"]]
+        self.assertEqual(removed, [["docker", "rm", "-f", "c1"]])
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c2"])
+
+    def test_ambiguous_prefix_lists_the_candidates_and_touches_nothing(self):
+        for fn in (session.cmd_resume, session.cmd_clean):
+            with self.subTest(fn=fn.__name__):
+                with self.assertRaises(SessionError) as ctx:
+                    self._quiet(fn, "act-CI")
+                self.assertIn("act-CI-build", str(ctx.exception))
+                self.assertIn("act-CI-test", str(ctx.exception))
+        self.assertEqual(self.fake_run.calls, [])
+        self.assertEqual(len(session._load_sessions()), 2)
+
+    def test_unknown_name_lists_what_is_parked(self):
+        with self.assertRaises(SessionError) as ctx:
+            self._quiet(session.cmd_clean, "nope")
+        self.assertIn("no parked session matches 'nope'", str(ctx.exception))
+        self.assertIn("act-CI-build, act-CI-test", str(ctx.exception))
+        self.assertEqual(self.fake_run.calls, [])
+
+    def test_main_exits_1_on_an_ambiguous_session(self):
+        from actbreak.cli import main
+
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = main(["resume", "act-CI"])
+        self.assertEqual(rc, 1)
+        self.assertIn("matches 2 parked sessions", err.getvalue())
+
+    def test_no_argument_still_resumes_everything(self):
+        with mock.patch.object(session, "_wait_and_reap", return_value=True) as wait:
+            rc = self._quiet(session.cmd_resume, None)
+        self.assertEqual(rc, 0)
+        self.assertEqual([c.args[2] for c in wait.call_args_list], ["c1", "c2"])
+        self.assertEqual(session._load_sessions(), [])
+
+
+# ---------------------------------------------------------------------------
 # _session_age
 # ---------------------------------------------------------------------------
 
