@@ -114,6 +114,7 @@ class FindJobContainerTests(unittest.TestCase):
             find_job_container(containers, "test", workflow="Matrix CI")
         message = str(ctx.exception)
         self.assertIn("matrix", message)
+        self.assertIn("--matrix KEY:VALUE", message)
         self.assertNotIn("narrow with the workflow name", message)
         for name in ("act-Matrix-CI-test-3.10-ubuntu-latest",
                      "act-Matrix-CI-test-3.11-ubuntu-latest"):

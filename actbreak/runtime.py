@@ -110,7 +110,8 @@ def find_job_container(
             raise AmbiguousContainerError(
                 f"job '{job}' is running as {len(names)} containers at once, which is what "
                 f"act does with a matrix job: {joined}. actbreak can't tell the legs apart, "
-                "so it won't guess which one you meant. Attach to the leg you want by hand.",
+                "so it won't guess which one you meant. Run a single leg with --matrix KEY:VALUE, "
+                "once for each matrix key, or attach to the leg you want by hand.",
                 candidates=names,
             )
         raise AmbiguousContainerError(

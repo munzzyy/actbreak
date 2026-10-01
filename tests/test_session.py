@@ -343,11 +343,27 @@ def _run_args(**overrides):
         no_attach=False,
         shell=None,
         timeout=session.DEFAULT_TIMEOUT,
+        matrix=[],
         act_arg=[],
         verbose=False,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+class BuildActCommandTests(unittest.TestCase):
+    def test_every_matrix_pair_reaches_act(self):
+        cmd = session._build_act_command(
+            "act", "/tmp/ci.yml", "test", ["-P", "x=y"], ["os:ubuntu-latest", "os:ubuntu-22.04"]
+        )
+        self.assertEqual(
+            cmd,
+            ["act", "-W", "/tmp/ci.yml", "--reuse", "-j", "test",
+             "--matrix", "os:ubuntu-latest", "--matrix", "os:ubuntu-22.04", "-P", "x=y"],
+        )
+
+    def test_no_matrix_adds_nothing(self):
+        self.assertNotIn("--matrix", session._build_act_command("act", "/tmp/ci.yml", "test", []))
 
 
 class CmdRunCleanupTests(unittest.TestCase):
@@ -403,6 +419,17 @@ class CmdRunCleanupTests(unittest.TestCase):
         self.assertFalse(
             Path(self.injected_dir).exists(), "the injection tmpdir must still be cleaned up"
         )
+
+    def test_matrix_flag_reaches_the_act_command(self):
+        popen = FakePopen(running=False, exit_code=0)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers):
+            with contextlib.redirect_stderr(io.StringIO()):
+                session.cmd_run(_run_args(workflow=str(self.workflow), matrix=["os:ubuntu-latest", "py:3.12"]))
+            act_cmd = subprocess.Popen.call_args.args[0]
+        self.assertEqual(act_cmd[act_cmd.index("--matrix"):act_cmd.index("--matrix") + 4],
+                         ["--matrix", "os:ubuntu-latest", "--matrix", "py:3.12"])
 
     def test_timeout_flag_reaches_every_wait_for_breakpoint_call(self):
         popen = FakePopen(running=True, exit_code=0)

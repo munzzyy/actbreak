@@ -13,9 +13,13 @@ import and skip it, even when pytest itself isn't installed. The
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -135,6 +139,96 @@ class BreakBeforeIntegrationTest(unittest.TestCase):
                 runner.rm_container(engine, container_name)
             shutil.rmtree(repo_root, ignore_errors=True)
             shutil.rmtree(inject_dir, ignore_errors=True)
+
+
+MATRIX_WORKFLOW = """\
+name: actbreak matrix check
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - name: step one
+        run: echo "leg ${{ matrix.n }} started"
+      - name: step two
+        run: echo "step two ran on leg ${{ matrix.n }}"
+"""
+
+
+@unittest.skipUnless(_tools_available(), SKIP_REASON)
+class MatrixLegIntegrationTest(unittest.TestCase):
+    """Drives the real CLI: `run --matrix ... --no-attach`, then `clean`.
+
+    The hold is released with a direct exec rm rather than `actbreak resume`,
+    because resume's wait for the job to finish depends on the container
+    state `act --reuse` leaves behind, which nothing here pins down yet."""
+
+    def test_matrix_flag_runs_one_leg_to_the_breakpoint(self):
+        work = Path(tempfile.mkdtemp(prefix="actbreak-it-matrix-"))
+        home = work / "home"
+        home.mkdir()
+        repo = work / "repo"
+        workflows_dir = repo / ".github" / "workflows"
+        workflows_dir.mkdir(parents=True)
+        (workflows_dir / "matrix.yml").write_text(MATRIX_WORKFLOW, encoding="utf-8")
+        log = work / "actbreak.log"
+        source_root = str(Path(__file__).resolve().parent.parent)
+        pythonpath = os.pathsep.join(filter(None, [source_root, os.environ.get("PYTHONPATH")]))
+        env = dict(os.environ, HOME=str(home), PYTHONPATH=pythonpath)
+        engine = detect_runtime("auto")
+        runner = CommandRunner()
+
+        def actbreak(*args, timeout):
+            # A file, never a pipe: the detached act inherits this stdout and
+            # keeps it open after actbreak exits, so reading a pipe to EOF
+            # would block until act is gone.
+            with open(log, "ab") as out:
+                return subprocess.run(
+                    [sys.executable, "-m", "actbreak", *args],
+                    cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                    timeout=timeout,
+                )
+
+        def leg_containers():
+            return [c for c in runner.ps(engine, all_containers=True)
+                    if c.name.startswith("act-") and "matrix-check" in c.name.lower()]
+
+        try:
+            result = actbreak(
+                "run", "matrix.yml", "--break-before", "step two", "--matrix", "n:1", "--no-attach",
+                "--timeout", "300", "--act-arg=-P", "--act-arg=ubuntu-latest=catthehacker/ubuntu:act-latest",
+                timeout=420,
+            )
+            output = log.read_text(encoding="utf-8", errors="replace")
+            self.assertEqual(result.returncode, 0, f"run failed, output tail:\n{output[-4000:]}")
+            self.assertIn("breakpoint hit", output)
+
+            sessions = json.loads((home / ".actbreak" / "state.json").read_text(encoding="utf-8"))["sessions"]
+            self.assertEqual(len(sessions), 1, sessions)
+            parked = sessions[0]
+            self.assertEqual([c.name for c in leg_containers()], [parked["container_name"]])
+
+            self.assertTrue(runner.rm_file(engine, parked["container_id"], "/tmp/actbreak/hold"))
+            deadline = time.monotonic() + 180
+            while "step two ran on leg 1" not in log.read_text(encoding="utf-8", errors="replace"):
+                if time.monotonic() > deadline:
+                    tail = log.read_text(encoding="utf-8", errors="replace")[-4000:]
+                    self.fail(f"the job never got past the released breakpoint, output tail:\n{tail}")
+                time.sleep(2)
+
+            cleaned = actbreak("clean", timeout=120)
+            self.assertEqual(cleaned.returncode, 0, log.read_text(encoding="utf-8", errors="replace")[-2000:])
+            self.assertEqual(leg_containers(), [])
+            sessions = json.loads((home / ".actbreak" / "state.json").read_text(encoding="utf-8"))["sessions"]
+            self.assertEqual(sessions, [])
+        finally:
+            for c in leg_containers():
+                runner.rm_container(engine, c.name)
+            shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":

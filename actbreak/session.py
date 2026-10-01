@@ -155,10 +155,14 @@ def _cleanup_tmpdir(tmpdir: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_act_command(act_bin: str, workflow_arg: str, job_name: str | None, act_args: list[str]) -> list[str]:
+def _build_act_command(
+    act_bin: str, workflow_arg: str, job_name: str | None, act_args: list[str], matrix: list[str] = ()
+) -> list[str]:
     cmd = [act_bin, "-W", workflow_arg, "--reuse"]
     if job_name:
         cmd += ["-j", job_name]
+    for pair in matrix:
+        cmd += ["--matrix", pair]
     cmd += act_args
     return cmd
 
@@ -383,7 +387,9 @@ def cmd_run(args) -> int:
     act_bin = require_act()
     engine = detect_runtime(args.runtime)
 
-    act_cmd = _build_act_command(act_bin, act_workflow_arg, job_name, list(args.act_arg or []))
+    act_cmd = _build_act_command(
+        act_bin, act_workflow_arg, job_name, list(args.act_arg or []), list(getattr(args, "matrix", None) or [])
+    )
     if args.verbose:
         print("actbreak: " + " ".join(shlex.quote(p) for p in act_cmd), file=sys.stderr)
 

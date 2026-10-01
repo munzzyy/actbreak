@@ -92,6 +92,25 @@ class ParserTests(unittest.TestCase):
                         main(["run", "ci.yml", "--break-on-failure", f"--timeout={bad}"])
                 self.assertEqual(ctx.exception.code, 2)
 
+    def test_matrix_is_repeatable_and_kept_in_order(self):
+        args = build_parser().parse_args(
+            ["run", "ci.yml", "--break-on-failure", "--matrix", "os:ubuntu-latest", "--matrix", "py:3.12"]
+        )
+        self.assertEqual(args.matrix, ["os:ubuntu-latest", "py:3.12"])
+        self.assertEqual(build_parser().parse_args(["run", "ci.yml", "--break-on-failure"]).matrix, [])
+
+    def test_matrix_value_may_itself_contain_a_colon(self):
+        args = build_parser().parse_args(["run", "ci.yml", "--break-on-failure", "--matrix", "img:node:20"])
+        self.assertEqual(args.matrix, ["img:node:20"])
+
+    def test_matrix_without_a_key_and_value_exits_2(self):
+        for bad in ("ubuntu-latest", ":x", "os:"):
+            with self.subTest(bad=bad):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        main(["run", "ci.yml", "--break-on-failure", f"--matrix={bad}"])
+                self.assertEqual(ctx.exception.code, 2)
+
     def test_invalid_runtime_choice_rejected(self):
         parser = build_parser()
         with self.assertRaises(SystemExit):
@@ -118,7 +137,7 @@ class ParserTests(unittest.TestCase):
         for token in ("run", "resume", "clean", "init-vscode", "--version", "--completions",
                       "--break-before", "--break-after", "--break-on-failure",
                       "--job", "--runtime", "--no-attach", "--shell", "--act-arg",
-                      "--timeout", "-v", "--verbose"):
+                      "--timeout", "--matrix", "-v", "--verbose"):
             self.assertIn(token, out)
 
     def test_completions_zsh_covers_parser(self):
@@ -128,7 +147,7 @@ class ParserTests(unittest.TestCase):
                       "'--version[", "'--completions[", "'*--break-before[",
                       "'*--break-after[", "'--break-on-failure[", "'--job[",
                       "'--runtime[", "'--no-attach[", "'--shell[", "--act-arg[", "'-v[",
-                      "'--verbose[", "'--timeout["):
+                      "'--verbose[", "'--timeout[", "'*--matrix["):
             self.assertIn(token, out)
 
     def test_completions_zsh_registers_itself_when_sourced(self):

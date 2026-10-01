@@ -18,10 +18,11 @@ Zero runtime dependencies. Python 3.9+, stdlib only.
 
 Early / v0.3.0, which isn't released yet. [CHANGELOG.md](CHANGELOG.md) lists
 what changed. The injection, selection and session logic is unit tested
-against fakes. One CI job also runs a real breakpoint through real `act` and
-Docker: it injects the hold, waits for the job container to reach it, and
-releases it. The `run`/`resume`/`clean` commands around that are covered by
-the unit tests, not by that job.
+against fakes. One CI job also runs real breakpoints through real `act` and
+Docker. One case injects the hold, waits for the job container to reach it,
+and releases it. Another runs `actbreak run --matrix ... --no-attach` and
+`actbreak clean` as commands against a two-leg matrix. `resume` and the
+rest of the commands are covered by the unit tests only.
 
 ## Install
 
@@ -100,6 +101,7 @@ those are the ones you have to select by position.
 | `--runtime {docker,podman,auto}` | container runtime to use (default: auto-detect) |
 | `--no-attach` | don't exec a shell automatically; print the attach command and hold |
 | `--shell SHELL` | shell to attach with, e.g. `zsh` or `'bash -l'` (default: try `sh`, then `bash`) |
+| `--matrix KEY:VALUE` | run only the matrix leg where `KEY` is `VALUE`, passed to act's own `--matrix` (repeatable, once per matrix key) |
 | `--timeout SECONDS` | how long to wait for each breakpoint before stopping `act` and removing its container (default: 1800; `0` means no deadline, wait as long as `act` runs) |
 | `--act-arg ARG` | extra argument passed through to `act` (repeatable) |
 | `-v`, `--verbose` | print the injection/act commands being run |
@@ -215,6 +217,7 @@ actbreak run ci.yml --break-after "Build" --no-attach
 actbreak run ci.yml --break-before "Install deps" --break-after "Build"
 actbreak run ci.yml --break-on-failure
 actbreak run ci.yml --break-before "Run tests" --shell zsh
+actbreak run ci.yml --break-before "Run tests" --matrix os:ubuntu-latest --matrix python:3.12
 ```
 
 ## How it works
@@ -237,10 +240,12 @@ actbreak run ci.yml --break-before "Run tests" --shell zsh
 
 ## Limitations
 
-- Matrix jobs are a hard stop. act runs one container per leg and they all
-  carry the same job id, so actbreak can't tell them apart and refuses to
-  guess. It names the containers and prints the `docker exec` / `podman exec`
-  command for each, so you can attach to the leg you want by hand.
+- A matrix job needs `--matrix` to pick one leg. act runs one container per
+  leg and they all carry the same job id, so actbreak can't tell them apart
+  and refuses to guess. `--matrix KEY:VALUE`, given once for each matrix key,
+  is passed straight to act so only that leg runs. Without it, actbreak
+  names the containers and prints the `docker exec` / `podman exec` command
+  for each, so you can attach to the leg you want by hand.
 - The breakpoint step needs a real shell in the job container: it runs `sh`
   with `mkdir`, `printf`, and `sleep`. A `scratch` or distroless image without
   those won't hold at the breakpoint.

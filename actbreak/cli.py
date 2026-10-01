@@ -18,6 +18,7 @@ examples:
   actbreak run ci.yml --break-before "Install deps" --break-after "Build"
   actbreak run ci.yml --break-on-failure
   actbreak run ci.yml --break-before "Run tests" --shell bash
+  actbreak run ci.yml --break-before Test --matrix os:ubuntu-latest
   actbreak steps ci.yml
   actbreak resume
   actbreak clean
@@ -70,6 +71,13 @@ def _non_negative_seconds(value: str) -> float:
     if not seconds >= 0:  # also rejects nan
         raise argparse.ArgumentTypeError(f"must be 0 or more seconds, got {value!r}")
     return seconds
+
+
+def _matrix_pair(value: str) -> str:
+    key, sep, val = value.partition(":")
+    if not (sep and key.strip() and val):
+        raise argparse.ArgumentTypeError(f"expected KEY:VALUE, e.g. os:ubuntu-latest, got {value!r}")
+    return value
 
 
 class PrintCompletionsAction(argparse.Action):
@@ -148,6 +156,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--shell",
         metavar="SHELL",
         help="shell to attach with, e.g. zsh or 'bash -l' (default: try sh, then bash)",
+    )
+    run_p.add_argument(
+        "--matrix",
+        type=_matrix_pair,
+        action="append",
+        default=[],
+        metavar="KEY:VALUE",
+        help="only run the matrix leg where KEY is VALUE, passed to act's --matrix (repeatable, once per key)",
     )
     run_p.add_argument(
         "--timeout",

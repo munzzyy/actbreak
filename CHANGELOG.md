@@ -15,6 +15,8 @@ New:
 - `--break-before` and `--break-after` can be repeated and mixed to stop at
   several points in one run. `resume` steps through them one at a time.
 - `--shell` picks the shell to attach with: `zsh` or `'bash -l'` for example.
+- `run --matrix KEY:VALUE` runs a single leg of a matrix job through act's
+  own `--matrix`, so a matrix job can be debugged at all.
 - `run --timeout SECONDS` sets how long to wait for each breakpoint. The
   default is still 30 minutes, and 0 waits as long as act runs.
 
