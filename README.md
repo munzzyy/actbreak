@@ -16,9 +16,12 @@ Zero runtime dependencies. Python 3.9+, stdlib only.
 
 ## Status
 
-Early / v0.2.0. Core injection and selection logic is unit tested; the
-run/resume/clean orchestration against real `act` + Docker/Podman is covered by
-a CI integration test rather than exercised in every environment this ships to.
+Early / v0.3.0, which isn't released yet. [CHANGELOG.md](CHANGELOG.md) lists
+what changed. The injection, selection and session logic is unit tested
+against fakes. One CI job also runs a real breakpoint through real `act` and
+Docker: it injects the hold, waits for the job container to reach it, and
+releases it. The `run`/`resume`/`clean` commands around that are covered by
+the unit tests, not by that job.
 
 ## Install
 
@@ -37,8 +40,8 @@ pip install -e .
 Don't install actbreak from PyPI yet. The listing there is stuck at 0.1.0,
 which predates `actbreak list`, `actbreak steps`, `init-vscode`, and shell
 completions, and it still carries the old Prosperity license.
-The 0.2.0 publish failed and hasn't been retried, so install from git until
-the PyPI page says 0.2.0.
+The 0.1.1 and 0.2.0 uploads failed, and the next one to go up will be 0.3.0,
+so install from git until the PyPI page says 0.3.0.
 
 Requires `act` on PATH, and one of Docker or Podman.
 
@@ -278,7 +281,7 @@ PATH, which in practice means it only runs in CI.
 
 ## License
 
-[GPL-3.0-or-later](LICENSE). You can use, study, change and share it. If you distribute a copy or a modified version, it has to stay under the GPL and come with its source. Releases up to v0.2.0 were under MIT.
+[GPL-3.0-or-later](LICENSE). You can use, study, change and share it. If you distribute a copy or a modified version, it has to stay under the GPL and come with its source. Releases up to and including v0.2.0 were under the Prosperity Public License 3.0.0. The code sat under MIT on main for a while after that, but no release was cut under MIT.
 
 ## Support
 
