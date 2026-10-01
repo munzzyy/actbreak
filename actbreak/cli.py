@@ -62,6 +62,16 @@ class BreakpointAction(argparse.Action):
         setattr(namespace, self.dest, items)
 
 
+def _non_negative_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {value!r}") from None
+    if not seconds >= 0:  # also rejects nan
+        raise argparse.ArgumentTypeError(f"must be 0 or more seconds, got {value!r}")
+    return seconds
+
+
 class PrintCompletionsAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         from .completions import generate_bash, generate_zsh
@@ -138,6 +148,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--shell",
         metavar="SHELL",
         help="shell to attach with, e.g. zsh or 'bash -l' (default: try sh, then bash)",
+    )
+    run_p.add_argument(
+        "--timeout",
+        type=_non_negative_seconds,
+        default=1800.0,
+        metavar="SECONDS",
+        help="how long to wait for each breakpoint before stopping act (default: 1800; 0 waits as long as act runs)",
     )
     run_p.add_argument(
         "--act-arg",

@@ -73,6 +73,25 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(args.act_arg, ["--pull=false", "-P"])
         self.assertTrue(args.verbose)
 
+    def test_timeout_defaults_to_the_session_default(self):
+        from actbreak import session
+
+        args = build_parser().parse_args(["run", "ci.yml", "--break-on-failure"])
+        self.assertEqual(args.timeout, session.DEFAULT_TIMEOUT)
+
+    def test_timeout_accepts_zero_and_fractions(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["run", "ci.yml", "--break-on-failure", "--timeout", "0"]).timeout, 0)
+        self.assertEqual(parser.parse_args(["run", "ci.yml", "--break-on-failure", "--timeout", "2.5"]).timeout, 2.5)
+
+    def test_negative_or_garbage_timeout_exits_2(self):
+        for bad in ("-1", "soon", "nan"):
+            with self.subTest(bad=bad):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as ctx:
+                        main(["run", "ci.yml", "--break-on-failure", f"--timeout={bad}"])
+                self.assertEqual(ctx.exception.code, 2)
+
     def test_invalid_runtime_choice_rejected(self):
         parser = build_parser()
         with self.assertRaises(SystemExit):
@@ -99,7 +118,7 @@ class ParserTests(unittest.TestCase):
         for token in ("run", "resume", "clean", "init-vscode", "--version", "--completions",
                       "--break-before", "--break-after", "--break-on-failure",
                       "--job", "--runtime", "--no-attach", "--shell", "--act-arg",
-                      "-v", "--verbose"):
+                      "--timeout", "-v", "--verbose"):
             self.assertIn(token, out)
 
     def test_completions_zsh_covers_parser(self):
@@ -109,7 +128,7 @@ class ParserTests(unittest.TestCase):
                       "'--version[", "'--completions[", "'*--break-before[",
                       "'*--break-after[", "'--break-on-failure[", "'--job[",
                       "'--runtime[", "'--no-attach[", "'--shell[", "--act-arg[", "'-v[",
-                      "'--verbose["):
+                      "'--verbose[", "'--timeout["):
             self.assertIn(token, out)
 
     def test_completions_zsh_registers_itself_when_sourced(self):

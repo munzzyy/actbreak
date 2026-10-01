@@ -291,6 +291,41 @@ class WaitForBreakpointTests(unittest.TestCase):
                 proc, runner, "docker", "build", None, _no_interrupt, timeout=-1
             )
         self.assertIn("timed out", str(ctx.exception))
+        self.assertIn("--timeout", str(ctx.exception))
+
+    def test_timeout_zero_keeps_polling_past_the_old_30_minute_limit(self):
+        runner = CommandRunner(run=FakeRunFn({"ps": FakeResult(stdout=NO_MATCH_PS)}))
+        proc = FakePopen(running=True)
+        clock = iter(range(0, 10**6, 600))
+        polls = {"n": 0}
+
+        class StopPolling(Exception):
+            pass
+
+        def interrupt_check():
+            polls["n"] += 1
+            if polls["n"] > 10:
+                raise StopPolling()
+
+        with mock.patch.object(session.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(session, "POLL_INTERVAL", 0):
+            with self.assertRaises(StopPolling):
+                session.wait_for_breakpoint(
+                    proc, runner, "docker", "build", None, interrupt_check, timeout=0
+                )
+        self.assertGreater(polls["n"], 10)
+
+    def test_a_short_timeout_raises_once_the_clock_passes_it(self):
+        runner = CommandRunner(run=FakeRunFn({"ps": FakeResult(stdout=NO_MATCH_PS)}))
+        proc = FakePopen(running=True)
+        clock = iter([0, 1, 6])
+        with mock.patch.object(session.time, "monotonic", lambda: next(clock)), \
+                mock.patch.object(session, "POLL_INTERVAL", 0):
+            with self.assertRaises(SessionError) as ctx:
+                session.wait_for_breakpoint(
+                    proc, runner, "docker", "build", None, _no_interrupt, timeout=5
+                )
+        self.assertIn("timed out after 5s", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +342,7 @@ def _run_args(**overrides):
         runtime="auto",
         no_attach=False,
         shell=None,
+        timeout=session.DEFAULT_TIMEOUT,
         act_arg=[],
         verbose=False,
     )
@@ -367,6 +403,47 @@ class CmdRunCleanupTests(unittest.TestCase):
         self.assertFalse(
             Path(self.injected_dir).exists(), "the injection tmpdir must still be cleaned up"
         )
+
+    def test_timeout_flag_reaches_every_wait_for_breakpoint_call(self):
+        popen = FakePopen(running=True, exit_code=0)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout=ONE_MATCH_PS), "test -f": FakeResult(returncode=0)}
+        )
+        hit = Container(id="c1", name="act-CI-build")
+        patchers = self._patched(popen, fake_run, [hit, hit])
+        with _patch_all(patchers):
+            args = _run_args(
+                workflow=str(self.workflow),
+                breakpoints=[("before", "Run tests"), ("after", "Run tests")],
+                timeout=42.0,
+            )
+            session.cmd_run(args)
+            calls = session.wait_for_breakpoint.call_args_list
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(call.kwargs.get("timeout"), 42.0)
+
+    def test_hitting_the_timeout_stops_act_and_removes_its_container(self):
+        popen = FakePopen(running=True)
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout=NO_MATCH_PS + ONE_MATCH_PS), "test -f": FakeResult(returncode=1)}
+        )
+        clock = iter([0, 1, 6] + [6] * 10)
+        patchers = (
+            mock.patch.object(subprocess, "Popen", return_value=popen),
+            mock.patch.object(session, "require_act", return_value="/usr/bin/act"),
+            mock.patch.object(session, "detect_runtime", return_value="docker"),
+            mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)),
+            mock.patch.object(session.tempfile, "mkdtemp", return_value=self.injected_dir),
+            mock.patch.object(session.time, "monotonic", lambda: next(clock)),
+            mock.patch.object(session, "POLL_INTERVAL", 0),
+        )
+        with _patch_all(patchers):
+            args = _run_args(workflow=str(self.workflow), timeout=5.0)
+            with self.assertRaises(SessionError):
+                session.cmd_run(args)
+        self.assertTrue(popen.terminated)
+        self.assertIn(["docker", "rm", "-f", "act-CI-build"], fake_run.calls)
 
     def test_session_error_when_act_already_exited_does_not_call_terminate_again(self):
         # proc.poll() already non-None (act exited on its own) -- cleanup
@@ -815,8 +892,23 @@ class CmdResumeTests(unittest.TestCase):
         runner = CommandRunner(run=fake_run)
         with mock.patch.object(session, "POLL_INTERVAL", 0):
             result = session._wait_and_reap(runner, "docker", "c1", timeout=0)
-        self.assertFalse(result)
+        self.assertEqual(result, "timeout")
         self.assertEqual([c for c in fake_run.calls if c[:2] == ["docker", "rm"]], [])
+
+    def test_resume_says_so_when_it_gives_up_waiting(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn(default=FakeResult(returncode=0))
+        err = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session, "_wait_and_reap", return_value="timeout"):
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        self.assertIn("gave up waiting for act-CI-build", err.getvalue())
+        self.assertIn("actbreak clean", err.getvalue())
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1"])
 
     def test_wait_and_reap_treats_an_already_removed_container_as_done(self):
         fake_run = FakeRunFn({"ps": FakeResult(stdout="")}, default=FakeResult(returncode=0))
@@ -844,7 +936,7 @@ class CmdResumeTests(unittest.TestCase):
         runner = CommandRunner(run=fake_run)
         with mock.patch.object(session, "POLL_INTERVAL", 0):
             result = session._wait_and_reap(runner, "docker", "c1", timeout=0)
-        self.assertFalse(result)
+        self.assertEqual(result, "timeout")
         self.assertFalse(any("test" in c for c in fake_run.calls))
 
     def test_resume_says_it_is_waiting_before_it_blocks(self):

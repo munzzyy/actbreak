@@ -244,15 +244,18 @@ def wait_for_breakpoint(
     shell: str = "sh",
 ) -> Container | None:
     """Poll until the job's container exists and has hit the hold, act exits
-    first, or `timeout` elapses. Returns None if act exited before hitting it."""
-    deadline = time.monotonic() + timeout
+    first, or `timeout` elapses (a timeout of 0 never elapses). Returns None
+    if act exited before hitting it."""
+    deadline = None if timeout == 0 else time.monotonic() + timeout
     while True:
         interrupt_check()
         if proc.poll() is not None:
             return None
-        if time.monotonic() > deadline:
+        if deadline is not None and time.monotonic() > deadline:
             raise SessionError(
-                f"timed out after {int(timeout)}s waiting for job '{job_name}' to hit the breakpoint"
+                f"timed out after {int(timeout)}s waiting for job '{job_name}' to hit the breakpoint; "
+                "a long build or a first image pull can take longer, so raise --timeout "
+                "(or pass --timeout 0 to wait as long as act runs)"
             )
         try:
             containers = runner.ps(engine)
@@ -326,6 +329,7 @@ def cmd_run(args) -> int:
     act_workflow_arg = str(workflow_path)
     shell = getattr(args, "shell", None)
     shells = (shell,) if shell else ("sh", "bash")
+    timeout = getattr(args, "timeout", DEFAULT_TIMEOUT)
 
     # hold_sequence lists every breakpoint's (label, position) in the order
     # the job will actually reach them -- see injector.inject_multi(). A
@@ -382,7 +386,8 @@ def cmd_run(args) -> int:
             exit_code = None
             while True:
                 container = wait_for_breakpoint(
-                    proc, runner, engine, job_name, workflow_hint, interrupt_check, shell=shells[0]
+                    proc, runner, engine, job_name, workflow_hint, interrupt_check,
+                    timeout=timeout, shell=shells[0],
                 )
                 if container is None:
                     exit_code = proc.wait()
@@ -460,8 +465,9 @@ def _wait_and_reap(
     """After `resume` drops the hold, the job runs on. Poll until it's no
     longer running, then remove it by id -- rm by id works on a stopped
     container, unlike the exec probe `clean`'s sweep uses. Returns True once
-    it's gone, False if it's still running when `timeout` elapses (the caller
-    then keeps the session so `clean` can reap it by id later).
+    it's gone, 'timeout' if it's still running when `timeout` elapses, and
+    False if it couldn't be listed or removed. Either way the caller keeps
+    the session so `clean` can reap it by id later.
 
     If `pending` is a non-empty list of the breakpoints still ahead (from a
     multi-breakpoint run), also watches for the hold file reappearing --
@@ -481,7 +487,7 @@ def _wait_and_reap(
         if pending and runner.file_exists(engine, container_id, "/tmp/actbreak/hold"):
             return "hit"
         if time.monotonic() >= deadline:
-            return False
+            return "timeout"
         time.sleep(POLL_INTERVAL)
 
 
@@ -562,9 +568,20 @@ def cmd_resume(args) -> int:
             print("actbreak: run 'actbreak resume' again to continue, or 'actbreak clean' to abort.")
             s = dict(s, label=next_label, position=next_position, pending=pending[1:])
             unresolved.append(s)
+        elif result == "timeout":
+            print(
+                f"actbreak: gave up waiting for {s['container_name']} after {int(DEFAULT_TIMEOUT // 60)} minutes; "
+                "the job is still running. Run 'actbreak clean' once it's done.",
+                file=sys.stderr,
+            )
+            unresolved.append(s)
         elif result:
             _cleanup_tmpdir(s.get("tmpdir"))
         else:
+            print(
+                f"actbreak: couldn't reap {s['container_name']}; run 'actbreak clean' to remove it.",
+                file=sys.stderr,
+            )
             unresolved.append(s)
         _save_sessions(unresolved + sessions[i + 1 :])
     return 0 if ok else 1

@@ -97,6 +97,7 @@ those are the ones you have to select by position.
 | `--runtime {docker,podman,auto}` | container runtime to use (default: auto-detect) |
 | `--no-attach` | don't exec a shell automatically; print the attach command and hold |
 | `--shell SHELL` | shell to attach with, e.g. `zsh` or `'bash -l'` (default: try `sh`, then `bash`) |
+| `--timeout SECONDS` | how long to wait for each breakpoint before stopping `act` and removing its container (default: 1800; `0` means no deadline, wait as long as `act` runs) |
 | `--act-arg ARG` | extra argument passed through to `act` (repeatable) |
 | `-v`, `--verbose` | print the injection/act commands being run |
 
