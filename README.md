@@ -303,6 +303,24 @@ The `integration` pytest marker (`pytest -m integration`) runs a real
 `act` + Docker/Podman end-to-end test; it's auto-skipped unless both are on
 PATH, which in practice means it only runs in CI.
 
+## Roadmap
+
+What is left needs the maintainer, or people running actbreak on their own
+workflows.
+
+- Cut 0.3.0 and get it onto PyPI. Everything under 0.3.0 in
+  [CHANGELOG.md](CHANGELOG.md) is done, but there is no tag yet. PyPI
+  rejected the earlier uploads because the project there does not trust the
+  release workflow yet. Adding that is a setting on pypi.org behind the
+  maintainer's login. Until then, install from git as [Install](#install)
+  says.
+- Reports from real projects. Most commands are only tested against fakes
+  so far (see [Status](#status)). `resume`, `clean` and `--break-on-failure`
+  depend on how act names its containers and what `act --reuse` leaves
+  running, and only real act can settle that. Jobs that set their own
+  `name:` are the case most worth trying. If something misbehaves, an issue
+  with the workflow and your act version helps the most.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). You can use, study, change and share it. If you distribute a copy or a modified version, it has to stay under the GPL and come with its source. Releases up to and including v0.2.0 were under the Prosperity Public License 3.0.0. The code sat under MIT on main for a while after that, but no release was cut under MIT.
