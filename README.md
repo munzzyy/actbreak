@@ -167,6 +167,12 @@ A prefix that matches more than one session, or none, is an error that lists
 what is parked. `clean` with a name skips its sweep for untracked
 containers, since that sweep would take the other parked sessions too.
 
+While a job is parked, `actbreak run` won't start that job again. The new
+run would stop at the old hold on its first check instead of its own, and
+dropping either hold would drop both. The error names the container in the
+way so you can resume or clean it first. A container that still holds a
+breakpoint but has no recorded session blocks the run the same way.
+
 `actbreak resume` drops the hold and then waits for the job to finish, so it
 can reap the container instead of leaving a stopped one behind. That wait is
 the rest of your workflow, so it can sit there for a while. Ctrl-C stops

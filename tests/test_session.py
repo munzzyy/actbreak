@@ -388,6 +388,14 @@ class CmdRunCleanupTests(unittest.TestCase):
         # under test, not to an auto-cleanup object that would double-remove it.
         self.injected_dir = tempfile.mkdtemp(prefix="actbreak-test-inject-")
         self.addCleanup(shutil.rmtree, self.injected_dir, True)
+        # These fakes list the job's container before act starts, which the
+        # parked-job check would refuse; ParkedJobRefusalTests covers that check.
+        for patcher in (
+            mock.patch.object(session, "_refuse_if_job_parked", lambda *a, **k: None),
+            *self._state_patchers(),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _patched(self, popen, fake_run, wait_side_effect):
         return (
@@ -833,6 +841,146 @@ class CmdRunCleanupTests(unittest.TestCase):
         self.assertFalse(
             container_rm, f"a held --no-attach container must not be reaped, got: {fake_run.calls}"
         )
+
+
+class ParkedJobRefusalTests(unittest.TestCase):
+    """A parked hold for the same job would be the first hold a new run sees,
+    so cmd_run refuses to start act until it's resumed or cleaned."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        state_dir = Path(self.tmp.name) / ".actbreak"
+        self.injected_dir = tempfile.mkdtemp(prefix="actbreak-test-inject-")
+        self.addCleanup(shutil.rmtree, self.injected_dir, True)
+        self.workflow = str(Path(fixture_path("multi_job.yml")).resolve())
+        self.popen = mock.MagicMock(return_value=FakePopen(running=True))
+        self.ps_all = ""
+        self.ps_running = ""
+        self.hold_rc = 1
+        self.calls = []
+        for patcher in (
+            mock.patch.object(session, "STATE_DIR", state_dir),
+            mock.patch.object(session, "STATE_FILE", state_dir / "state.json"),
+            mock.patch.object(subprocess, "Popen", self.popen),
+            mock.patch.object(session, "require_act", return_value="/usr/bin/act"),
+            mock.patch.object(session, "detect_runtime", return_value="docker"),
+            mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=self._run)),
+            mock.patch.object(session.tempfile, "mkdtemp", return_value=self.injected_dir),
+            mock.patch.object(session, "wait_for_breakpoint",
+                              return_value=Container(id="new1", name="act-Build-and-Test-build")),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _run(self, args, **kwargs):
+        self.calls.append(list(args))
+        if args[1] == "ps":
+            return FakeResult(stdout=self.ps_all if "-a" in args else self.ps_running)
+        if "test" in args:
+            return FakeResult(returncode=self.hold_rc)
+        return FakeResult()
+
+    def _seed(self, **overrides):
+        entry = {
+            "container_id": "old1", "container_name": "act-Build-and-Test-build", "runtime": "docker",
+            "tmpdir": None, "workflow": self.workflow, "job": "build", "label": "Checkout",
+            "position": "before", "pending": [],
+        }
+        entry.update(overrides)
+        session._save_sessions([entry])
+
+    def _cmd_run(self, **overrides):
+        args = _run_args(workflow=self.workflow, breakpoints=[("before", "build:2")], no_attach=True)
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return session.cmd_run(args)
+
+    def test_a_session_parked_on_the_same_job_blocks_the_run_before_act_starts(self):
+        self._seed()
+        self.ps_all = self.ps_running = "old1\tact-Build-and-Test-build\tUp 3 minutes\n"
+        with self.assertRaises(SessionError) as ctx:
+            self._cmd_run()
+        message = str(ctx.exception)
+        self.popen.assert_not_called()
+        self.assertIn("act-Build-and-Test-build", message)
+        self.assertIn("step 'Checkout' (before)", message)
+        self.assertIn("'actbreak resume act-Build-and-Test-build' or "
+                      "'actbreak clean act-Build-and-Test-build'", message)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["old1"])
+        self.assertFalse(Path(self.injected_dir).exists(), "the injected copy is removed on refusal")
+
+    def test_main_exits_1_with_the_reason(self):
+        from actbreak.cli import main
+
+        self._seed()
+        self.ps_all = self.ps_running = "old1\tact-Build-and-Test-build\tUp 3 minutes\n"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = main(["run", self.workflow, "--break-before", "build:2", "--no-attach"])
+        self.assertEqual(rc, 1)
+        self.assertIn("still parked", err.getvalue())
+        self.popen.assert_not_called()
+
+    def test_a_stopped_parked_container_blocks_too(self):
+        self._seed()
+        self.ps_all = "old1\tact-Build-and-Test-build\tExited (137) 1 minute ago\n"
+        with self.assertRaises(SessionError):
+            self._cmd_run()
+        self.popen.assert_not_called()
+
+    def test_a_post_mortem_session_on_the_same_job_points_at_clean(self):
+        self._seed(post_mortem=True, exit_code=1, label=None, position=None)
+        self.ps_all = "old1\tact-Build-and-Test-build\tUp 1 minute\n"
+        with self.assertRaises(SessionError) as ctx:
+            self._cmd_run()
+        self.assertIn("post-mortem", str(ctx.exception))
+        self.assertIn("'actbreak clean act-Build-and-Test-build'", str(ctx.exception))
+        self.assertNotIn("actbreak resume", str(ctx.exception))
+
+    def test_a_session_parked_on_another_job_does_not_block(self):
+        self._seed(container_id="old2", container_name="act-Build-and-Test-test", job="test")
+        self.ps_all = self.ps_running = "old2\tact-Build-and-Test-test\tUp 3 minutes\n"
+        self.hold_rc = 0
+        self.assertEqual(self._cmd_run(), 0)
+        self.popen.assert_called_once()
+
+    def test_a_session_parked_from_another_workflow_does_not_block(self):
+        self._seed(container_id="old3", container_name="act-CI-build", workflow="/elsewhere/ci.yml")
+        self.ps_all = self.ps_running = "old3\tact-CI-build\tUp 3 minutes\n"
+        self.hold_rc = 0
+        self.assertEqual(self._cmd_run(), 0)
+        self.popen.assert_called_once()
+
+    def test_a_session_whose_container_is_gone_does_not_block(self):
+        self._seed()
+        self.assertEqual(self._cmd_run(), 0)
+        self.popen.assert_called_once()
+
+    def test_an_unrecorded_container_holding_this_job_blocks(self):
+        self.ps_all = self.ps_running = "s1\tact-Build-and-Test-build\tUp 5 minutes\n"
+        self.hold_rc = 0
+        with self.assertRaises(SessionError) as ctx:
+            self._cmd_run()
+        self.popen.assert_not_called()
+        self.assertIn("act-Build-and-Test-build", str(ctx.exception))
+        self.assertIn("'docker rm -f act-Build-and-Test-build'", str(ctx.exception))
+        self.assertIn(["docker", "exec", "s1", "test", "-f", "/tmp/actbreak/hold"], self.calls)
+
+    def test_an_unrecorded_container_without_a_hold_does_not_block(self):
+        self.ps_all = self.ps_running = "s1\tact-Build-and-Test-build\tUp 5 minutes\n"
+        self.hold_rc = 1
+        self.assertEqual(self._cmd_run(), 0)
+        self.popen.assert_called_once()
+
+    def test_break_on_failure_without_a_job_checks_every_job(self):
+        self._seed(container_id="old2", container_name="act-Build-and-Test-test", job="test")
+        self.ps_all = "old2\tact-Build-and-Test-test\tUp 3 minutes\n"
+        with self.assertRaises(SessionError) as ctx:
+            self._cmd_run(breakpoints=[], break_on_failure=True)
+        self.assertIn("job 'test'", str(ctx.exception))
+        self.popen.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

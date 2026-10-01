@@ -48,6 +48,9 @@ Fixes:
   banner, right before it starts waiting.
 - A step name with an emoji, or any other character past U+FFFF, no
   longer makes act reject the copied workflow.
+- `run` won't start a job that is still parked from an earlier
+  `--no-attach` run. The new run used to take the old hold for its own
+  breakpoint and report a hit at the wrong step.
 - The zsh completion works when sourced. Flags that take a value say so.
 - `--break-on-failure` never attaches to or removes another workflow's
   parked container, and it reaps every job's container in a multi-job

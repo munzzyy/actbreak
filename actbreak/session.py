@@ -297,6 +297,59 @@ def wait_for_breakpoint(
         time.sleep(POLL_INTERVAL)
 
 
+def _parked_job_containers(
+    runner: CommandRunner, engine: str, job_names: list[str], workflow_hint: str | None
+) -> list[Container]:
+    """Running containers wait_for_breakpoint would take for one of these jobs."""
+    containers = runner.ps(engine)
+    found: list[Container] = []
+    for job in job_names:
+        try:
+            candidates = [find_job_container(containers, job, workflow_hint)]
+        except AmbiguousContainerError as e:
+            candidates = [c for c in containers if c.name in e.candidates]
+        except ContainerNotFoundError:
+            candidates = []
+        found += [c for c in candidates if c not in found]
+    return found
+
+
+def _refuse_if_job_parked(
+    runner: CommandRunner, engine: str, workflow: Path, job_names: list[str], workflow_hint: str | None
+) -> None:
+    """Raise SessionError while one of these jobs still has a container held
+    at a breakpoint. A new run would find that hold on its first poll and
+    report a hit at the wrong step, and releasing either would release both."""
+    sessions = _load_sessions()
+    cache: dict = {}
+    for s in sessions:
+        if s.get("workflow") != str(workflow) or s.get("job") not in job_names:
+            continue
+        status = _container_status(runner, s.get("runtime", ""), s.get("container_id", ""), cache)
+        if status not in ("running", "stopped"):
+            continue
+        name = s.get("container_name") or s.get("container_id") or "?"
+        if s.get("post_mortem"):
+            where, fix = "as a post-mortem container", f"'actbreak clean {name}'"
+        else:
+            where = f"at step '{s.get('label', '?')}' ({s.get('position', '?')})"
+            fix = f"'actbreak resume {name}' or 'actbreak clean {name}'"
+        raise SessionError(
+            f"job '{s['job']}' is still parked {where} in {name}, and a new run of it would stop "
+            f"at that hold instead of its own. Run {fix} first"
+        )
+
+    known = {s.get("container_id") for s in sessions}
+    for c in _parked_job_containers(runner, engine, job_names, workflow_hint):
+        if c.id not in known and runner.file_exists(engine, c.id, "/tmp/actbreak/hold"):
+            raise SessionError(
+                f"{c.name} is still holding at an actbreak breakpoint that no session records, and a "
+                "new run of this job would stop at that hold instead of its own. Remove it first with "
+                f"'{engine} rm -f {c.name}' (a plain 'actbreak clean' removes it too, along with "
+                "every parked session)"
+            )
+
+
 def _post_mortem(
     runner: CommandRunner,
     engine: str,
@@ -380,6 +433,12 @@ def cmd_run(args) -> int:
 
     act_bin = require_act()
     engine = detect_runtime(args.runtime)
+    runner = CommandRunner()
+    try:
+        _refuse_if_job_parked(runner, engine, workflow_path, [job_name] if job_name else list(jobs), workflow_hint)
+    except SessionError:
+        _cleanup_tmpdir(tmpdir)
+        raise
 
     act_cmd = _build_act_command(
         act_bin, act_workflow_arg, job_name, list(args.act_arg or []), list(getattr(args, "matrix", None) or [])
@@ -387,7 +446,6 @@ def cmd_run(args) -> int:
     if args.verbose:
         print("actbreak: " + " ".join(shlex.quote(p) for p in act_cmd), file=sys.stderr)
 
-    runner = CommandRunner()
     proc = subprocess.Popen(act_cmd, cwd=str(repo_root), start_new_session=True)
 
     interrupted = {"flag": False}
