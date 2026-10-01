@@ -335,13 +335,15 @@ def _refuse_if_job_parked(
         if status not in ("running", "stopped"):
             continue
         name = s.get("container_name") or s.get("container_id") or "?"
+        cid = s.get("container_id")
+        held_in = f"{name} ({cid})" if cid and cid != name else name
         if s.get("post_mortem"):
             where, fix = "as a post-mortem container", f"'actbreak clean {name}'"
         else:
             where = f"at step '{s.get('label', '?')}' ({s.get('position', '?')})"
             fix = f"'actbreak resume {name}' or 'actbreak clean {name}'"
         raise SessionError(
-            f"job '{s['job']}' is still parked {where} in {name}, and a new run of it would stop "
+            f"job '{s['job']}' is still parked {where} in {held_in}, and a new run of it would stop "
             f"at that hold instead of its own. Run {fix} first"
         )
 
@@ -349,10 +351,10 @@ def _refuse_if_job_parked(
     for c in _parked_job_containers(runner, engine, job_names, workflow_hint):
         if c.id not in known and runner.file_exists(engine, c.id, "/tmp/actbreak/hold"):
             raise SessionError(
-                f"{c.name} is still holding at an actbreak breakpoint that no session records, and a "
-                "new run of this job would stop at that hold instead of its own. Remove it first with "
-                f"'{engine} rm -f {c.name}' (a plain 'actbreak clean' removes it too, along with "
-                "every parked session)"
+                f"{c.name} ({c.id}) is still holding at an actbreak breakpoint that no session "
+                "records, and a new run of this job would stop at that hold instead of its own. "
+                f"Remove it first with '{engine} rm -f {c.name}' (a plain 'actbreak clean' removes "
+                "it too, along with every parked session)"
             )
 
 

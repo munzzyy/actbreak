@@ -903,12 +903,20 @@ class ParkedJobRefusalTests(unittest.TestCase):
             self._cmd_run()
         message = str(ctx.exception)
         self.popen.assert_not_called()
-        self.assertIn("act-Build-and-Test-build", message)
+        self.assertIn("in act-Build-and-Test-build (old1)", message)
         self.assertIn("step 'Checkout' (before)", message)
         self.assertIn("'actbreak resume act-Build-and-Test-build' or "
                       "'actbreak clean act-Build-and-Test-build'", message)
         self.assertEqual([s["container_id"] for s in session._load_sessions()], ["old1"])
         self.assertFalse(Path(self.injected_dir).exists(), "the injected copy is removed on refusal")
+
+    def test_a_session_without_a_name_gives_the_id_once(self):
+        self._seed(container_name=None)
+        self.ps_all = self.ps_running = "old1\tact-Build-and-Test-build\tUp 3 minutes\n"
+        with self.assertRaises(SessionError) as ctx:
+            self._cmd_run()
+        self.assertIn("in old1, and", str(ctx.exception))
+        self.assertNotIn("(old1)", str(ctx.exception))
 
     def test_main_exits_1_with_the_reason(self):
         from actbreak.cli import main
@@ -963,7 +971,7 @@ class ParkedJobRefusalTests(unittest.TestCase):
         with self.assertRaises(SessionError) as ctx:
             self._cmd_run()
         self.popen.assert_not_called()
-        self.assertIn("act-Build-and-Test-build", str(ctx.exception))
+        self.assertIn("act-Build-and-Test-build (s1)", str(ctx.exception))
         self.assertIn("'docker rm -f act-Build-and-Test-build'", str(ctx.exception))
         self.assertIn(["docker", "exec", "s1", "test", "-f", "/tmp/actbreak/hold"], self.calls)
 
