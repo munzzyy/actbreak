@@ -248,8 +248,7 @@ class CommandRunnerTests(unittest.TestCase):
         )
 
     def test_exec_interactive_does_not_open_a_second_shell_when_the_session_exits_127(self):
-        # sh exits 127 after a mistyped command; that's the user's session
-        # ending, not sh being missing.
+        # sh exits 127 after a mistyped command; that's the session ending, not sh missing.
         fake = FakeRunner(
             {
                 "exec c1 sh -c :": FakeResult(returncode=0),

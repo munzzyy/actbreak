@@ -207,8 +207,7 @@ class CommandRunner:
                               capture_output=True, text=True, check=False)
             if getattr(probe, "returncode", 1) not in (126, 127):
                 return self._exec_tty(engine, container, shell)
-        # None of them is installed. Run the last one anyway so the engine's
-        # own "not found" error reaches the terminal instead of nothing.
+        # None installed: run the last anyway so the engine's own "not found" error shows.
         return self._exec_tty(engine, container, shells[-1])
 
     def _exec_tty(self, engine: str, container: str, shell: str) -> int:

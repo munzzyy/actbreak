@@ -629,10 +629,7 @@ def cmd_resume(args) -> int:
         print("actbreak: no held sessions to resume", file=sys.stderr)
         return 1
     picked = _select_sessions(sessions, getattr(args, "session", None))
-    # What goes back to disk: None marks a session that's finished. Saved
-    # after every session, not once at the end, so an interrupt (Ctrl-C, or
-    # a SIGTERM that skips every except/finally) while blocked on a later one
-    # never leaves an already-gone entry behind in STATE_FILE.
+    # None marks a finished session; saved after each one so an interrupt can't leave it in STATE_FILE.
     slots: list[dict | None] = list(sessions)
 
     def save() -> None:
@@ -664,8 +661,7 @@ def cmd_resume(args) -> int:
             print(f"actbreak: failed to resume {s.get('container_name', '?')}: {e}", file=sys.stderr)
             continue
         if not removed:
-            # The container isn't running (it stopped across a reboot, say),
-            # so there's nothing to resume into. Keep the record for `clean`.
+            # Not running (stopped across a reboot, say): nothing to resume into, keep it for `clean`.
             ok = False
             print(
                 f"actbreak: could not resume {s.get('container_name', '?')}: its container "
@@ -674,8 +670,7 @@ def cmd_resume(args) -> int:
             )
             continue
         print(f"actbreak: resumed {s['container_name']}")
-        # Breakpoints still ahead from a multi-breakpoint run: if the job
-        # reaches one before finishing, re-park there instead of reaping.
+        # Breakpoints still ahead: if the job reaches one, re-park there instead of reaping.
         pending = list(s.get("pending") or [])
         print(
             f"actbreak: waiting for {s['container_name']} to finish "
@@ -684,8 +679,7 @@ def cmd_resume(args) -> int:
         try:
             result = _wait_and_reap(runner, s["runtime"], s["container_id"], pending=pending)
         except KeyboardInterrupt:
-            # "Stop watching", not "abort the job": this session and every one
-            # queued behind it stay resumable and cleanable.
+            # "Stop watching", not "abort the job": this session and the ones behind it stay parked.
             print(
                 "\nactbreak: stopped waiting; the job is still running. "
                 "Run 'actbreak clean' once it's done.",

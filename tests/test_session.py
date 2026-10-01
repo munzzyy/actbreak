@@ -388,8 +388,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         # under test, not to an auto-cleanup object that would double-remove it.
         self.injected_dir = tempfile.mkdtemp(prefix="actbreak-test-inject-")
         self.addCleanup(shutil.rmtree, self.injected_dir, True)
-        # These fakes list the job's container before act starts, which the
-        # parked-job check would refuse; ParkedJobRefusalTests covers that check.
+        # These fakes list the job's container before act starts; ParkedJobRefusalTests covers that check.
         for patcher in (
             mock.patch.object(session, "_refuse_if_job_parked", lambda *a, **k: None),
             *self._state_patchers(),
@@ -1513,8 +1512,7 @@ class TargetOneSessionTests(unittest.TestCase):
         self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c2"])
 
     def test_clean_by_name_removes_only_that_session(self):
-        # Both containers still hold the hold file, so the stray sweep would
-        # take c2 too if it ran.
+        # Both containers hold the hold file, so the stray sweep would take c2 too if it ran.
         self.fake_run.responses["ps"] = FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\nc2\tact-CI-test\tUp 1 minute\n")
         with mock.patch.object(session.shutil, "which", return_value="/usr/bin/docker"):
             rc = self._quiet(session.cmd_clean, "act-CI-build")

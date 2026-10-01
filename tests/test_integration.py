@@ -1,9 +1,9 @@
-"""End-to-end integration test: real act, real docker/podman, no fakes.
+"""End-to-end integration tests: real act, real docker/podman, no fakes.
 
 Skipped automatically wherever `act` and a container runtime aren't both on
 PATH -- which is everywhere except the dedicated `integration` job in CI
-(see .github/workflows/ci.yml). This is the only test in the suite that
-touches real infrastructure; everything else in tests/ is a pure unit test.
+(see .github/workflows/ci.yml). These are the only tests in the suite that
+touch real infrastructure; everything else in tests/ is a pure unit test.
 
 Written as a plain unittest.TestCase so `python -m unittest` can always
 import and skip it, even when pytest itself isn't installed. The
@@ -183,9 +183,7 @@ class MatrixLegIntegrationTest(unittest.TestCase):
         runner = CommandRunner()
 
         def actbreak(*args, timeout):
-            # A file, never a pipe: the detached act inherits this stdout and
-            # keeps it open after actbreak exits, so reading a pipe to EOF
-            # would block until act is gone.
+            # A file, not a pipe: the detached act keeps this stdout open after actbreak exits.
             with open(log, "ab") as out:
                 return subprocess.run(
                     [sys.executable, "-m", "actbreak", *args],
