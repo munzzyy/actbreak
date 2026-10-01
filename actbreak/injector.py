@@ -31,7 +31,6 @@ Not supported (raises InjectionError with a clear message):
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
@@ -402,8 +401,25 @@ def _sh_single_quote(s: str) -> str:
 
 def _banner_safe(s: str) -> str:
     """Fold any whitespace run (newlines included) to a single space so the
-    value stays on one physical line inside the run: | block scalar."""
+    banner prints the value on one line."""
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _yaml_double_quoted(s: str) -> str:
+    """ASCII-only YAML double-quoted scalar. Past U+FFFF it writes \\U, since
+    act's YAML parser rejects the surrogate pairs json.dumps would emit."""
+    out = []
+    for ch in s:
+        cp = ord(ch)
+        if ch in '"\\':
+            out.append("\\" + ch)
+        elif 0x20 <= cp < 0x7F:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append(f"\\u{cp:04x}")
+        else:
+            out.append(f"\\U{cp:08x}")
+    return '"' + "".join(out) + '"'
 
 
 def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newline: str) -> list[str]:
@@ -413,38 +429,37 @@ def build_hold_lines(job: str, label: str, position: str, dash_indent: int, newl
     key_indent = dash_indent + 2
     body_indent = key_indent + 2
     step_name = f"actbreak breakpoint ({position} '{label}' in job '{job}')"
-    # Banner text is single-line display only. A step name can legally carry a
-    # newline (a double-quoted "a\nb" decodes to one), which would otherwise
-    # break out of the echo line and corrupt the `run: |` block scalar, and
-    # printf keeps a leading -e/-n or a \c in the name from being eaten.
-    job_banner = _banner_safe(job)
-    label_banner = _banner_safe(label)
 
     out: list[str] = []
 
     def emit(text: str, indent: int) -> None:
         out.append(" " * indent + text + newline)
 
-    emit(f"- name: {json.dumps(step_name)}", dash_indent)
+    emit(f"- name: {_yaml_double_quoted(step_name)}", dash_indent)
     # Without `if: always()` the runner skips every step after a failed one,
     # so a breakpoint set after (or downstream of) a step that failed would
     # never run -- exactly the moment you most want a shell in the container.
     # A debugger should hold whether the job is passing or already broken.
     emit("if: always()", key_indent)
     emit("shell: sh", key_indent)
+    # Via env, not script text: the runner expands ${{ }} in run: before sh parses it.
+    emit("env:", key_indent)
+    emit(f"ACTBREAK_JOB: {_yaml_double_quoted(_banner_safe(job))}", body_indent)
+    emit(f"ACTBREAK_STEP: {_yaml_double_quoted(_banner_safe(label))}", body_indent)
     emit("run: |", key_indent)
 
+    # Hold file last, so a failing banner line fails the step instead of faking a hold.
     script = [
         "mkdir -p /tmp/actbreak",
-        ": > /tmp/actbreak/hold",
         "printf '%s\\n' " + _sh_single_quote("=================================================="),
         "printf '%s\\n' " + _sh_single_quote(f"actbreak: BREAKPOINT HIT ({position})"),
-        "printf '%s\\n' " + _sh_single_quote(f"actbreak:   job:  {job_banner}"),
-        "printf '%s\\n' " + _sh_single_quote(f"actbreak:   step: {label_banner}"),
+        "printf 'actbreak:   job:  %s\\n' \"$ACTBREAK_JOB\"",
+        "printf 'actbreak:   step: %s\\n' \"$ACTBREAK_STEP\"",
         "printf '%s\\n' " + _sh_single_quote(
             "actbreak: run 'actbreak resume', or delete /tmp/actbreak/hold in this container"
         ),
         "printf '%s\\n' " + _sh_single_quote("=================================================="),
+        ": > /tmp/actbreak/hold",
         "while [ -f /tmp/actbreak/hold ]; do sleep 1; done",
         "printf '%s\\n' " + _sh_single_quote("actbreak: resumed, continuing workflow"),
     ]

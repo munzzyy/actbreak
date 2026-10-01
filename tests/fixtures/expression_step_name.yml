@@ -1,0 +1,15 @@
+name: Release
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Deploy ${{ github.event.head_commit.message }}
+        run: ./deploy.sh
+      - name: Tag '${{ github.ref_name }}'
+        run: git tag "release-$GITHUB_SHA"

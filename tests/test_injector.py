@@ -9,13 +9,18 @@ containing colons/quotes.
 
 from __future__ import annotations
 
+import codecs
+import os
+import re
+import shutil
+import subprocess
 import unittest
 
 from actbreak import injector
 from actbreak.errors import InjectionError
 from actbreak.selector import resolve_selector
 
-from .util import fixture_path
+from .util import FIXTURES_DIR, fixture_path
 
 # build_hold_lines' output length is a function only of the fixed shell
 # script it emits -- constant regardless of job/label/position/indent.
@@ -258,8 +263,8 @@ class InjectorSpliceTests(unittest.TestCase):
         job, idx = resolve_selector(jobs, "Deploy to prod (fix bug #123)")
         result = assert_exact_splice(text, lines, jobs, job, idx, "before")
         result_text = "".join(result)
-        self.assertIn("step: Deploy to prod (fix bug #123)", result_text)
-        self.assertNotIn("step: >-", result_text)
+        self.assertIn('ACTBREAK_STEP: "Deploy to prod (fix bug #123)"', result_text)
+        self.assertNotIn('ACTBREAK_STEP: ">-"', result_text)
 
     def test_colon_and_quoted_names_splice(self):
         text, lines, jobs, _ = load("colon_names.yml")
@@ -383,15 +388,18 @@ class InjectorGoldenTests(unittest.TestCase):
             '      - name: "actbreak breakpoint (before \'Run tests\' in job \'build\')"\n'
             "        if: always()\n"
             "        shell: sh\n"
+            "        env:\n"
+            "          ACTBREAK_JOB: \"build\"\n"
+            "          ACTBREAK_STEP: \"Run tests\"\n"
             "        run: |\n"
             "          mkdir -p /tmp/actbreak\n"
-            "          : > /tmp/actbreak/hold\n"
             "          printf '%s\\n' '=================================================='\n"
             "          printf '%s\\n' 'actbreak: BREAKPOINT HIT (before)'\n"
-            "          printf '%s\\n' 'actbreak:   job:  build'\n"
-            "          printf '%s\\n' 'actbreak:   step: Run tests'\n"
+            "          printf 'actbreak:   job:  %s\\n' \"$ACTBREAK_JOB\"\n"
+            "          printf 'actbreak:   step: %s\\n' \"$ACTBREAK_STEP\"\n"
             "          printf '%s\\n' 'actbreak: run '\"'\"'actbreak resume'\"'\"', or delete /tmp/actbreak/hold in this container'\n"
             "          printf '%s\\n' '=================================================='\n"
+            "          : > /tmp/actbreak/hold\n"
             "          while [ -f /tmp/actbreak/hold ]; do sleep 1; done\n"
             "          printf '%s\\n' 'actbreak: resumed, continuing workflow'\n"
             "      - name: Run tests\n"
@@ -407,7 +415,7 @@ class InjectorGoldenTests(unittest.TestCase):
         for ln in lines:
             body = ln.rstrip("\n")
             self.assertTrue(body == "" or body.startswith(" "), repr(ln))
-        self.assertIn("step: Build and Test", "".join(lines))
+        self.assertIn('ACTBREAK_STEP: "Build and Test"', "".join(lines))
 
     def test_hold_step_always_runs_even_after_a_failed_step(self):
         # A step after a failed one is skipped unless it carries `if:`. The
@@ -440,21 +448,93 @@ class InjectorGoldenTests(unittest.TestCase):
             '      - name: "actbreak breakpoint (after \'Checkout\' in job \'build\')"\r\n'
             "        if: always()\r\n"
             "        shell: sh\r\n"
+            "        env:\r\n"
+            "          ACTBREAK_JOB: \"build\"\r\n"
+            "          ACTBREAK_STEP: \"Checkout\"\r\n"
             "        run: |\r\n"
             "          mkdir -p /tmp/actbreak\r\n"
-            "          : > /tmp/actbreak/hold\r\n"
             "          printf '%s\\n' '=================================================='\r\n"
             "          printf '%s\\n' 'actbreak: BREAKPOINT HIT (after)'\r\n"
-            "          printf '%s\\n' 'actbreak:   job:  build'\r\n"
-            "          printf '%s\\n' 'actbreak:   step: Checkout'\r\n"
+            "          printf 'actbreak:   job:  %s\\n' \"$ACTBREAK_JOB\"\r\n"
+            "          printf 'actbreak:   step: %s\\n' \"$ACTBREAK_STEP\"\r\n"
             "          printf '%s\\n' 'actbreak: run '\"'\"'actbreak resume'\"'\"', or delete /tmp/actbreak/hold in this container'\r\n"
             "          printf '%s\\n' '=================================================='\r\n"
+            "          : > /tmp/actbreak/hold\r\n"
             "          while [ -f /tmp/actbreak/hold ]; do sleep 1; done\r\n"
             "          printf '%s\\n' 'actbreak: resumed, continuing workflow'\r\n"
             "      - name: Run tests\r\n"
             "        run: pytest -v\r\n"
         )
         self.assertEqual("".join(result), expected)
+
+
+class HoldStepScriptTests(unittest.TestCase):
+    """The injected `run:` script is shell code the runner hands to sh. Step
+    and job names stay out of it, so neither a quote nor a ${{ }} expression
+    in a name can change what sh parses."""
+
+    @staticmethod
+    def _run_block(result_lines):
+        """The injected hold step's `run: |` body, dedented, with LF endings."""
+        lines = [ln.rstrip("\r\n") for ln in result_lines]
+        start = next(i for i, ln in enumerate(lines) if "actbreak breakpoint (" in ln)
+        run_at = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+        key_indent = len(lines[run_at]) - len(lines[run_at].lstrip(" "))
+        body = []
+        for ln in lines[run_at + 1:]:
+            if ln.strip() and len(ln) - len(ln.lstrip(" ")) <= key_indent:
+                break
+            body.append(ln)
+        return [ln[key_indent + 2:] for ln in body]
+
+    def test_an_expression_in_a_step_name_never_reaches_the_run_block(self):
+        _, lines, jobs, _ = load("expression_step_name.yml")
+        for idx, label in ((1, "Deploy ${{ github.event.head_commit.message }}"),
+                           (2, "Tag '${{ github.ref_name }}'")):
+            self.assertEqual(jobs["deploy"].steps[idx].name, label)
+            result = injector.inject(lines, jobs, "deploy", idx, "before")
+            script = "\n".join(self._run_block(result))
+            self.assertNotIn("${{", script)
+            self.assertIn('printf \'actbreak:   step: %s\\n\' "$ACTBREAK_STEP"', script)
+            self.assertIn(f"          ACTBREAK_STEP: \"{label}\"\n", result)
+
+    @unittest.skipUnless(shutil.which("sh"), "needs sh")
+    def test_every_fixture_injects_a_run_block_sh_can_parse(self):
+        checked = 0
+        for name in sorted(os.listdir(FIXTURES_DIR)):
+            try:
+                _, lines, jobs, _ = load(name)
+            except InjectionError:
+                continue
+            for job in jobs.values():
+                for step in job.steps:
+                    result = injector.inject(lines, jobs, job.name, step.index, "before")
+                    script = "\n".join(self._run_block(result)) + "\n"
+                    proc = subprocess.run(["sh", "-n"], input=script, capture_output=True, text=True)
+                    self.assertEqual(proc.returncode, 0, f"{name} {job.name}:{step.index}: {proc.stderr}")
+                    checked += 1
+        self.assertGreater(checked, 20)
+
+    def test_hold_file_is_created_after_the_banner_right_before_the_wait(self):
+        for position in ("before", "after"):
+            script = self._run_block(injector.build_hold_lines("build", "Run tests", position, 6, "\n"))
+            create = script.index(": > /tmp/actbreak/hold")
+            wait = script.index("while [ -f /tmp/actbreak/hold ]; do sleep 1; done")
+            last_banner = max(i for i, ln in enumerate(script[:wait]) if ln.startswith("printf "))
+            self.assertEqual(create, wait - 1)
+            self.assertLess(last_banner, create)
+            self.assertIn("delete /tmp/actbreak/hold", script[last_banner - 1])
+
+    def test_a_name_past_u_ffff_is_written_without_surrogate_escapes(self):
+        lines = injector.build_hold_lines("build", "\U0001F680 Ship \"it\" \\ now", "after", 6, "\n")
+        text = "".join(lines)
+        self.assertIsNone(re.search(r"\\u[dD][89abAB]", text))
+        self.assertTrue(text.isascii())
+        step_line = next(ln for ln in lines if "ACTBREAK_STEP:" in ln)
+        quoted = step_line.split("ACTBREAK_STEP: ", 1)[1].rstrip("\n")
+        self.assertEqual(quoted, '"\\U0001f680 Ship \\"it\\" \\\\ now"')
+        decoded = codecs.decode(quoted[1:-1], "unicode_escape")
+        self.assertEqual(decoded, "\U0001F680 Ship \"it\" \\ now")
 
 
 class InvisibleLineBreakTests(unittest.TestCase):

@@ -42,6 +42,12 @@ Fixes:
   jobs, instead of one blaming a `--job` flag nobody passed.
 - A matrix job's ambiguity error names each leg's container and prints the
   exec command for it.
+- The breakpoint step gets the step and job names through `env:` instead
+  of having them pasted into its script, so a `${{ }}` expression in a
+  step name can't break the script. It creates the hold file after its
+  banner, right before it starts waiting.
+- A step name with an emoji, or any other character past U+FFFF, no
+  longer makes act reject the copied workflow.
 - The zsh completion works when sourced. Flags that take a value say so.
 - `--break-on-failure` never attaches to or removes another workflow's
   parked container, and it reaps every job's container in a multi-job
