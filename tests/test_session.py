@@ -610,8 +610,12 @@ class CmdRunCleanupTests(unittest.TestCase):
             workflow=str(multi),
             breakpoints=[("before", "Lint"), ("before", "Upload artifact")],
         )
-        with self.assertRaises(SelectorError):
+        with self.assertRaises(SelectorError) as ctx:
             session.cmd_run(args)
+        message = str(ctx.exception)
+        self.assertIn("different jobs ('lint' and 'build')", message)
+        self.assertIn("must be in the same job", message)
+        self.assertNotIn("--job", message)
 
     def test_break_on_failure_success_reaps_container_without_a_job_flag(self):
         # The exact command from the field report: `actbreak run ci.yml
@@ -1180,6 +1184,59 @@ class CmdResumeTests(unittest.TestCase):
                         with contextlib.redirect_stdout(buf):
                             session.cmd_resume(None)
                 self.assertIn(f"attach with: {expected}\n", buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# breakpoints across jobs
+# ---------------------------------------------------------------------------
+
+
+class CrossJobBreakpointTests(unittest.TestCase):
+    def setUp(self):
+        text, _ = injector.read_workflow_text(fixture_path("multi_job.yml"))
+        self.jobs = injector.parse_workflow(text.splitlines(keepends=True))
+
+    def _main(self, *argv):
+        from actbreak.cli import main
+
+        err = io.StringIO()
+        with mock.patch.object(session, "require_act", side_effect=AssertionError("act must not be needed")):
+            with contextlib.redirect_stderr(err):
+                rc = main(["run", fixture_path("multi_job.yml"), *argv])
+        return rc, err.getvalue()
+
+    def test_index_selectors_in_two_jobs_name_both_jobs_and_not_job_flag(self):
+        rc, err = self._main("--break-before", "build:1", "--break-before", "test:2")
+        self.assertEqual(rc, 1)
+        self.assertIn("'build' and 'test'", err)
+        self.assertIn("all of a run's breakpoints must be in the same job", err)
+        self.assertNotIn("--job", err)
+
+    def test_name_selectors_in_two_jobs_name_both_jobs_and_not_job_flag(self):
+        rc, err = self._main("--break-before", "Upload artifact", "--break-before", "Test")
+        self.assertEqual(rc, 1)
+        self.assertIn("'build' and 'test'", err)
+        self.assertIn("all of a run's breakpoints must be in the same job", err)
+        self.assertNotIn("--job", err)
+
+    def test_explicit_job_still_reports_the_job_conflict(self):
+        rc, err = self._main("--job", "build", "--break-before", "test:2")
+        self.assertEqual(rc, 1)
+        self.assertIn("--job 'build' conflicts", err)
+
+    def test_a_shared_step_name_resolves_in_the_first_breakpoints_job(self):
+        from actbreak.selector import resolve_breakpoints
+
+        job, targets = resolve_breakpoints(self.jobs, [("before", "build:1"), ("before", "Checkout")])
+        self.assertEqual(job, "build")
+        self.assertEqual(targets, [("build", 1, "before"), ("build", 0, "before")])
+
+    def test_a_name_missing_everywhere_keeps_the_not_found_error(self):
+        from actbreak.selector import resolve_breakpoints
+
+        with self.assertRaises(SelectorError) as ctx:
+            resolve_breakpoints(self.jobs, [("before", "build:1"), ("after", "Nope")])
+        self.assertIn("no step named 'Nope' found in job 'build'", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------

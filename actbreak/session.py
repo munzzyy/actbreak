@@ -30,7 +30,7 @@ from .errors import (
     SessionError,
 )
 from .runtime import CommandRunner, Container, detect_runtime, find_job_container, require_act
-from .selector import resolve_selector
+from .selector import resolve_breakpoints
 
 POLL_INTERVAL = 1.0
 DEFAULT_TIMEOUT = 1800.0  # 30 minutes -- generous, but bounded
@@ -369,13 +369,7 @@ def cmd_run(args) -> int:
     # with a one-item sequence.
     hold_sequence: list[tuple[str, str]] = []
     if breakpoint_requested:
-        targets = []
-        for position, selector in breakpoints:
-            hint = job_name if job_name is not None else args.job
-            resolved_job, step_index = resolve_selector(jobs, selector, hint)
-            if job_name is None:
-                job_name = resolved_job
-            targets.append((resolved_job, step_index, position))
+        job_name, targets = resolve_breakpoints(jobs, breakpoints, args.job)
         tmpdir = tempfile.mkdtemp(prefix="actbreak-")
         dest = str(Path(tmpdir) / workflow_path.name)
         hold_sequence = injector.inject_multi_file(str(workflow_path), dest, targets)

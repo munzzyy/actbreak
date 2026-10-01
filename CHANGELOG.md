@@ -38,6 +38,8 @@ Fixes:
 - A session parked with `--shell` remembers it for the next attach command.
 - Exiting the breakpoint shell with status 127 (a mistyped command, then
   `exit`) no longer opens a second shell.
+- Breakpoints that land in two different jobs get an error naming both
+  jobs, instead of one blaming a `--job` flag nobody passed.
 - A matrix job's ambiguity error names each leg's container and prints the
   exec command for it.
 - The zsh completion works when sourced. Flags that take a value say so.

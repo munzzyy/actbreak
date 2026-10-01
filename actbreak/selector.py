@@ -92,3 +92,45 @@ def resolve_selector(
             "or select by position with '<job>:<index>'"
         )
     return by_name
+
+
+def resolve_breakpoints(
+    jobs: dict[str, JobInfo], breakpoints: list[tuple[str, str]], job_hint: str | None = None
+) -> tuple[str, list[tuple[str, int, str]]]:
+    """Resolve a run's (position, selector) breakpoints to (job, targets),
+    where each target is (job, step_index, position).
+
+    One run debugs one job, so every breakpoint has to land in the same job.
+    Without --job, the first breakpoint picks it, and later step names are
+    looked up in that job first, which lets a name like "Checkout" that
+    several jobs share resolve without --job. A later selector that only
+    exists in some other job gets an error that says so, rather than the
+    --job conflict or not-found error the narrowed lookup would raise."""
+    job = job_hint
+    first_selector = None
+    targets: list[tuple[str, int, str]] = []
+    for position, selector in breakpoints:
+        try:
+            resolved_job, step_index = resolve_selector(jobs, selector, job)
+        except SelectorError:
+            if job_hint is None and first_selector is not None:
+                _reject_if_in_another_job(jobs, selector, first_selector, job)
+            raise
+        if job is None:
+            job = resolved_job
+            first_selector = selector
+        targets.append((resolved_job, step_index, position))
+    return job, targets
+
+
+def _reject_if_in_another_job(jobs: dict[str, JobInfo], selector: str, first_selector: str, job: str) -> None:
+    try:
+        other_job, _ = resolve_selector(jobs, selector)
+    except SelectorError:
+        return
+    if other_job != job:
+        raise SelectorError(
+            f"breakpoints {first_selector!r} and {selector!r} are in different jobs "
+            f"({job!r} and {other_job!r}). actbreak runs one job at a time, so all of a run's "
+            "breakpoints must be in the same job; debug the other one in a separate run"
+        )
