@@ -51,6 +51,9 @@ Fixes:
 - `run` won't start a job that is still parked from an earlier
   `--no-attach` run. The new run used to take the old hold for its own
   breakpoint and report a hit at the wrong step.
+- When act exits before reaching a breakpoint, `run` names the ones it
+  never got to. A job act skipped used to look like a clean pass. `resume`
+  does the same when the job finishes before its next breakpoint.
 - The zsh completion works when sourced. Flags that take a value say so.
 - `--break-on-failure` never attaches to or removes another workflow's
   parked container, and it reaps every job's container in a multi-job

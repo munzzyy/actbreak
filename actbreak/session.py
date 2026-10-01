@@ -174,6 +174,12 @@ def _attach_command_str(engine: str, container_name: str, shell: str = "sh") -> 
     return " ".join(shlex.quote(p) for p in (engine, "exec", "-it", container_name, *shlex.split(shell)))
 
 
+def _never_reached(job: str, missed: list) -> str:
+    noun = "breakpoint" if len(missed) == 1 else f"{len(missed)} breakpoints"
+    where = ", ".join(f"step '{label}' ({position})" for label, position in missed)
+    return f"actbreak: {noun} never reached -- job '{job}', {where}"
+
+
 def _match_run_jobs(
     containers: list[Container], job_name: str | None, jobs, workflow_hint: str | None
 ) -> list[tuple[str, Container]]:
@@ -477,6 +483,12 @@ def cmd_run(args) -> int:
                 )
                 if container is None:
                     exit_code = proc.wait()
+                    print(f"{_never_reached(job_name, remaining)}; act exited {exit_code}", file=sys.stderr)
+                    print(
+                        "actbreak: a job skipped by its `if:`, or by a `needs:` job that failed, never "
+                        "runs its steps; act's output above has the details",
+                        file=sys.stderr,
+                    )
                     break
 
                 label, position = remaining.pop(0)
@@ -696,6 +708,8 @@ def cmd_resume(args) -> int:
                 file=sys.stderr,
             )
         elif result:
+            if pending:
+                print(f"{_never_reached(s.get('job', '?'), pending)}; the job finished first", file=sys.stderr)
             _cleanup_tmpdir(s.get("tmpdir"))
             slots[i] = None
         else:

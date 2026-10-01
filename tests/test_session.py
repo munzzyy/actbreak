@@ -983,6 +983,85 @@ class ParkedJobRefusalTests(unittest.TestCase):
         self.popen.assert_not_called()
 
 
+class NeverReachedTests(unittest.TestCase):
+    """When act exits before a breakpoint's hold ever shows up (the job was
+    skipped, or act stopped early), the run says which ones it never got to
+    instead of returning act's exit code with nothing else."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        state_dir = Path(self.tmp.name) / ".actbreak"
+        self.workflow = str(Path(fixture_path("multi_job.yml")).resolve())
+        self.fake_run = FakeRunFn({"ps": FakeResult(stdout="")})
+        for patcher in (
+            mock.patch.object(session, "STATE_DIR", state_dir),
+            mock.patch.object(session, "STATE_FILE", state_dir / "state.json"),
+            mock.patch.object(session, "require_act", return_value="/usr/bin/act"),
+            mock.patch.object(session, "detect_runtime", return_value="docker"),
+            mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=self.fake_run)),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _cmd_run(self, popen, breakpoints, waits=None):
+        patchers = [mock.patch.object(subprocess, "Popen", return_value=popen)]
+        if waits is not None:
+            patchers.append(mock.patch.object(session, "wait_for_breakpoint", side_effect=waits))
+        out, err = io.StringIO(), io.StringIO()
+        with _patch_all(patchers), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = session.cmd_run(_run_args(workflow=self.workflow, breakpoints=breakpoints))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_act_exiting_before_the_breakpoint_says_so_and_keeps_its_exit_code(self):
+        for exit_code in (0, 2):
+            rc, out, err = self._cmd_run(FakePopen(running=False, exit_code=exit_code), [("before", "build:1")])
+            self.assertEqual(rc, exit_code)
+            line = next(ln for ln in err.splitlines() if "never reached" in ln)
+            self.assertIn("job 'build'", line)
+            self.assertIn("step 'Build' (before)", line)
+            self.assertIn(f"act exited {exit_code}", line)
+            self.assertNotIn("breakpoint hit", out)
+
+    def test_only_the_breakpoints_not_reached_are_named(self):
+        hit = Container(id="c1", name="act-Build-and-Test-build")
+        rc, out, err = self._cmd_run(
+            FakePopen(running=True, exit_code=0), [("before", "build:1"), ("after", "build:2")], waits=[hit, None]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("breakpoint hit (1/2) -- job 'build', step 'Build' (before)", out)
+        line = next(ln for ln in err.splitlines() if "never reached" in ln)
+        self.assertIn("step 'Upload artifact' (after)", line)
+        self.assertNotIn("'Build'", line)
+
+    def test_a_run_that_reaches_every_breakpoint_prints_no_such_line(self):
+        hit = Container(id="c1", name="act-Build-and-Test-build")
+        rc, out, err = self._cmd_run(
+            FakePopen(running=True, exit_code=0), [("before", "build:1"), ("after", "build:2")], waits=[hit, hit]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("breakpoint hit"), 2)
+        self.assertNotIn("never reached", err)
+
+    def test_resume_names_pending_breakpoints_the_job_finished_without(self):
+        base = {
+            "runtime": "docker", "container_id": "c1", "container_name": "act-Build-and-Test-build",
+            "tmpdir": None, "workflow": self.workflow, "job": "build", "label": "Build", "position": "before",
+        }
+        self.fake_run.responses = {"ps": FakeResult(stdout="c1\tact-Build-and-Test-build\tExited (0) 1 second ago\n")}
+        for pending, expect in (([["Upload artifact", "after"]], True), ([], False)):
+            session._save_sessions([dict(base, pending=pending)])
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = session.cmd_resume(SimpleNamespace(session=None))
+            self.assertEqual(rc, 0)
+            self.assertEqual(session._load_sessions(), [])
+            if expect:
+                self.assertIn("breakpoint never reached -- job 'build', step 'Upload artifact' (after)", err.getvalue())
+            else:
+                self.assertNotIn("never reached", err.getvalue())
+
+
 # ---------------------------------------------------------------------------
 # cmd_resume
 # ---------------------------------------------------------------------------
