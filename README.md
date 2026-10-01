@@ -129,15 +129,25 @@ couldn't finish) left parked, one per line, with each one's live container
 status read from `docker ps` / `podman ps`:
 
 ```
-actbreak: 2 parked debug sessions:
+actbreak: 3 parked debug sessions:
   act-CI-build [running] -- job 'build', step 'Run tests' (before), held for 5m -- /repo/.github/workflows/ci.yml
   act-CI-test [gone] -- job 'test', step 'Build' (after), held for 3h -- /repo/.github/workflows/ci.yml
+  act-CI-lint [running] -- job 'lint', post-mortem after act exited 1, held for 2m -- /repo/.github/workflows/ci.yml
 ```
 
 `running` is still held and attachable; `stopped` and `gone` are orphans to
 clear with `actbreak clean`. The `held for` age is how long ago the session
 was parked, so you can spot the one that's been sitting for hours instead of
 minutes. With nothing parked it just says so.
+
+A `--break-on-failure --no-attach` run that fails parks its post-mortem
+container the same way. act has already exited by then and there is no hold
+to drop, so `resume` leaves it alone and `clean` removes it.
+
+`actbreak clean` removes every parked container and its temp files. If a
+removal fails, it keeps that session, says so, and exits 1, so the next
+`clean` can try again. A session whose container is already gone is just
+dropped.
 
 `actbreak resume` drops the hold and then waits for the job to finish, so it
 can reap the container instead of leaving a stopped one behind. That wait is
@@ -237,9 +247,12 @@ actbreak run ci.yml --break-before "Run tests" --shell zsh
 - `act --reuse` keeps the job container alive so you can attach to it. actbreak
   reaps that container once the run finishes cleanly (resumed to the end, the
   breakpoint never hit, or a `--break-on-failure` run that passed), so a normal
-  run doesn't leave a stopped container behind. The one it keeps on purpose is
-  `--no-attach`, which parks the container for `actbreak resume` to pick up
-  later; clear those with `actbreak clean`.
+  run doesn't leave a stopped container behind. The ones it keeps on purpose
+  are recorded so `actbreak list` shows them and `actbreak clean` removes them:
+  a `--no-attach` breakpoint, parked for `actbreak resume` to pick up later, a
+  `--break-on-failure --no-attach` post-mortem container, and the containers a
+  failed `--break-on-failure` run leaves when several jobs are still alive and
+  it has no single one to attach to.
 
 ### Why not just parse the YAML?
 

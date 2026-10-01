@@ -701,6 +701,84 @@ class CmdRunCleanupTests(unittest.TestCase):
         )
         self.assertIn("act-CI-build", container_rm[0])
 
+    def _state_patchers(self):
+        state_dir = Path(self.tmp.name) / ".actbreak"
+        return (
+            mock.patch.object(session, "STATE_DIR", state_dir),
+            mock.patch.object(session, "STATE_FILE", state_dir / "state.json"),
+        )
+
+    def test_no_attach_records_the_shell_it_was_given(self):
+        popen = FakePopen(running=True)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: Container(id="c1", name="act-CI-build"))
+        with _patch_all(patchers + self._state_patchers()):
+            with contextlib.redirect_stdout(io.StringIO()):
+                session.cmd_run(_run_args(workflow=str(self.workflow), no_attach=True, shell="bash"))
+            sessions = session._load_sessions()
+        self.assertEqual(sessions[0]["shell"], "bash")
+
+    def test_no_attach_without_a_shell_records_no_shell_key(self):
+        popen = FakePopen(running=True)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=ONE_MATCH_PS)})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: Container(id="c1", name="act-CI-build"))
+        with _patch_all(patchers + self._state_patchers()):
+            with contextlib.redirect_stdout(io.StringIO()):
+                session.cmd_run(_run_args(workflow=str(self.workflow), no_attach=True))
+            sessions = session._load_sessions()
+        self.assertNotIn("shell", sessions[0])
+
+    def test_break_on_failure_no_attach_parks_the_post_mortem_container(self):
+        wf = self.repo_root / ".github" / "workflows" / "bt.yml"
+        wf.write_text(
+            "name: Build and Test\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - name: Build\n        run: exit 1\n"
+        )
+        popen = FakePopen(running=False, exit_code=1)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c0ffee\tact-Build-and-Test-build\tUp 1 second\n")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        out = io.StringIO()
+        with _patch_all(patchers + self._state_patchers()):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = session.cmd_run(
+                    _run_args(workflow=str(wf), breakpoints=[], break_on_failure=True, no_attach=True)
+                )
+            sessions = session._load_sessions()
+            listing = io.StringIO()
+            with contextlib.redirect_stdout(listing):
+                session.cmd_list(None)
+            with mock.patch.object(session.shutil, "which", return_value=None):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    clean_rc = session.cmd_clean(None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["container_id"], "c0ffee")
+        self.assertTrue(sessions[0]["post_mortem"])
+        self.assertEqual(sessions[0]["job"], "build")
+        self.assertEqual(sessions[0]["workflow"], str(wf.resolve()))
+        self.assertIn("actbreak clean", out.getvalue())
+        self.assertIn("act-Build-and-Test-build [running] -- job 'build', post-mortem after act exited 1",
+                      listing.getvalue())
+        self.assertEqual(clean_rc, 0)
+        self.assertIn(["docker", "rm", "-f", "c0ffee"], fake_run.calls)
+        self.assertFalse([c for c in fake_run.calls if "-it" in c], "--no-attach must not exec a shell")
+
+    def test_post_mortem_with_several_live_job_containers_parks_each_one(self):
+        two = self.repo_root / ".github" / "workflows" / "two.yml"
+        two.write_text(
+            "name: CI\non: push\njobs:\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - name: A\n        run: exit 1\n"
+            "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - name: B\n        run: exit 1\n"
+        )
+        popen = FakePopen(running=False, exit_code=1)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tUp 1 second\nc2\tact-CI-test\tUp 1 second\n")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        with _patch_all(patchers + self._state_patchers()):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                session.cmd_run(_run_args(workflow=str(two), breakpoints=[], break_on_failure=True))
+            parked = {(s["container_id"], s["job"]) for s in session._load_sessions()}
+        self.assertEqual(parked, {("c1", "build"), ("c2", "test")})
+
     def test_no_attach_hold_does_not_reap_the_container(self):
         # Regression guard: the intentionally-held --no-attach container must
         # survive so `actbreak resume` can still reach it.
@@ -982,10 +1060,99 @@ class CmdResumeTests(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
             with mock.patch.object(session.shutil, "which", return_value=None):
-                with contextlib.redirect_stdout(buf):
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
                     rc = session.cmd_clean(None)
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
         self.assertNotIn("cleaned", buf.getvalue())
+
+    def _clean(self, fake_run):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session.shutil, "which", return_value=None):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = session.cmd_clean(None)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_clean_keeps_a_session_it_failed_to_remove(self):
+        tmpdir = tempfile.mkdtemp(prefix="actbreak-test-keep-")
+        self.addCleanup(shutil.rmtree, tmpdir, True)
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": tmpdir}]
+        )
+        fake_run = FakeRunFn(
+            {"docker rm": FakeResult(returncode=1), "ps": FakeResult(stdout="c1\tact-CI-build\tUp 2 minutes\n")}
+        )
+        rc, out, err = self._clean(fake_run)
+        self.assertEqual(rc, 1)
+        self.assertIn("failed to clean act-CI-build", err)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1"])
+        self.assertTrue(Path(tmpdir).is_dir(), "the kept session's tmpdir must stay on disk")
+
+    def test_clean_drops_a_session_whose_container_is_already_gone(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn({"docker rm": FakeResult(returncode=1), "ps": FakeResult(stdout=NO_MATCH_PS)})
+        rc, out, err = self._clean(fake_run)
+        self.assertEqual(rc, 0)
+        self.assertIn("act-CI-build was already gone", out)
+        self.assertEqual(session._load_sessions(), [])
+
+    def test_clean_keeps_a_session_when_the_engine_cannot_list_containers(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+        )
+        fake_run = FakeRunFn({"docker rm": FakeResult(returncode=1), "ps": FakeResult(returncode=1)})
+        rc, out, err = self._clean(fake_run)
+        self.assertEqual(rc, 1)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1"])
+
+    def test_resume_on_a_post_mortem_session_points_at_clean(self):
+        self._seed(
+            [{"runtime": "docker", "container_id": "c0ffee", "container_name": "act-Build-and-Test-build",
+              "tmpdir": None, "post_mortem": True, "exit_code": 1}]
+        )
+        fake_run = FakeRunFn(default=FakeResult(returncode=0))
+        err = io.StringIO()
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session, "_wait_and_reap") as wait:
+                with contextlib.redirect_stderr(err):
+                    rc = session.cmd_resume(None)
+        self.assertEqual(rc, 1)
+        wait.assert_not_called()
+        self.assertIn("nothing to resume", err.getvalue())
+        self.assertIn("actbreak clean", err.getvalue())
+        self.assertEqual(fake_run.calls, [])
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c0ffee"])
+
+    def test_resume_skips_post_mortem_sessions_but_resumes_the_rest(self):
+        held = {"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}
+        dead = {"runtime": "docker", "container_id": "c2", "container_name": "act-CI-test", "tmpdir": None,
+                "post_mortem": True, "exit_code": 1}
+        self._seed([held, dead])
+        fake_run = FakeRunFn(default=FakeResult(returncode=0))
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+            with mock.patch.object(session, "_wait_and_reap", return_value=True):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c2"])
+        self.assertTrue(all("c2" not in c for c in fake_run.calls))
+
+    def test_resume_hit_message_uses_the_shell_the_run_was_started_with(self):
+        base = {"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None,
+                "label": "Install deps", "position": "before", "pending": [["Run tests", "after"]]}
+        for extra, expected in (({"shell": "bash"}, "docker exec -it act-CI-build bash"),
+                                ({}, "docker exec -it act-CI-build sh")):
+            with self.subTest(expected=expected):
+                self._seed([dict(base, **extra)])
+                buf = io.StringIO()
+                with mock.patch.object(session, "CommandRunner",
+                                       lambda: CommandRunner(run=FakeRunFn(default=FakeResult(returncode=0)))):
+                    with mock.patch.object(session, "_wait_and_reap", return_value="hit"):
+                        with contextlib.redirect_stdout(buf):
+                            session.cmd_resume(None)
+                self.assertIn(f"attach with: {expected}\n", buf.getvalue())
 
 
 # ---------------------------------------------------------------------------

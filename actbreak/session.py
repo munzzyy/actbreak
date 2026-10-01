@@ -114,27 +114,34 @@ def _record_session(
     workflow: Path,
     job: str,
     label: str,
-    position: str,
+    position: str | None,
     pending: list[tuple[str, str]] | None = None,
+    shell: str | None = None,
+    post_mortem_exit: int | None = None,
 ) -> None:
+    entry = {
+        "container_id": container.id,
+        "container_name": container.name,
+        "runtime": engine,
+        "tmpdir": tmpdir,
+        "workflow": str(workflow),
+        "job": job,
+        "label": label,
+        "position": position,
+        # Breakpoints from the same multi-breakpoint run that are still
+        # ahead of this one, as [label, position] pairs -- lets `resume`
+        # step to the next one instead of running straight to completion.
+        "pending": [list(p) for p in pending] if pending else [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Optional keys: state files written before they existed lack them.
+    if shell:
+        entry["shell"] = shell
+    if post_mortem_exit is not None:
+        entry["post_mortem"] = True
+        entry["exit_code"] = post_mortem_exit
     sessions = _load_sessions()
-    sessions.append(
-        {
-            "container_id": container.id,
-            "container_name": container.name,
-            "runtime": engine,
-            "tmpdir": tmpdir,
-            "workflow": str(workflow),
-            "job": job,
-            "label": label,
-            "position": position,
-            # Breakpoints from the same multi-breakpoint run that are still
-            # ahead of this one, as [label, position] pairs -- lets `resume`
-            # step to the next one instead of running straight to completion.
-            "pending": [list(p) for p in pending] if pending else [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    sessions.append(entry)
     _save_sessions(sessions)
 
 
@@ -163,16 +170,17 @@ def _attach_command_str(engine: str, container_name: str, shell: str = "sh") -> 
     return " ".join(shlex.quote(p) for p in (engine, "exec", "-it", container_name, *shlex.split(shell)))
 
 
-def _match_run_containers(
+def _match_run_jobs(
     containers: list[Container], job_name: str | None, jobs, workflow_hint: str | None
-) -> list[Container]:
-    """The containers that belong to THIS run, matched unambiguously by job
-    name (narrowed by the workflow): the one job when -j was given, otherwise
-    one per parsed job. Never falls back to "every act-* container", so it
-    can't touch an unrelated workflow's parked debug container, and it skips
-    any job whose container is absent or ambiguous -- cleanup never guesses."""
+) -> list[tuple[str, Container]]:
+    """The containers that belong to THIS run, each with the job it was
+    matched to, matched unambiguously by job name (narrowed by the
+    workflow): the one job when -j was given, otherwise one per parsed job.
+    Never falls back to "every act-* container", so it can't touch an
+    unrelated workflow's parked debug container, and it skips any job whose
+    container is absent or ambiguous -- cleanup never guesses."""
     names = [job_name] if job_name else list(jobs or [])
-    matched: list[Container] = []
+    matched: list[tuple[str, Container]] = []
     for name in names:
         try:
             container = find_job_container(containers, name, workflow_hint)
@@ -180,9 +188,15 @@ def _match_run_containers(
             # Not found for this job, or ambiguous (AmbiguousContainerError is
             # a subclass) -- either way, don't guess.
             continue
-        if container not in matched:
-            matched.append(container)
+        if all(container != c for _, c in matched):
+            matched.append((name, container))
     return matched
+
+
+def _match_run_containers(
+    containers: list[Container], job_name: str | None, jobs, workflow_hint: str | None
+) -> list[Container]:
+    return [c for _, c in _match_run_jobs(containers, job_name, jobs, workflow_hint)]
 
 
 def _terminate_act_and_container(
@@ -282,16 +296,25 @@ def wait_for_breakpoint(
 def _post_mortem(
     runner: CommandRunner,
     engine: str,
+    workflow: Path,
     job_name: str | None,
     jobs,
     workflow_hint: str | None,
     no_attach: bool,
     exit_code: int,
     shells: tuple[str, ...] = ("sh", "bash"),
+    shell: str | None = None,
 ) -> int:
     print(f"actbreak: act exited {exit_code}; looking for the job container for post-mortem", file=sys.stderr)
     containers = runner.ps(engine, all_containers=True)
-    candidates = _match_run_containers(containers, job_name, jobs, workflow_hint)
+    matched = _match_run_jobs(containers, job_name, jobs, workflow_hint)
+    candidates = [c for _, c in matched]
+
+    def park(job: str, container: Container) -> None:
+        _record_session(
+            container, engine, None, workflow, job, None, None, shell=shell, post_mortem_exit=exit_code
+        )
+
     if not candidates:
         # No container for this run's own job(s). Never fall back to some
         # other act-* container -- attaching to (and later force-removing)
@@ -302,14 +325,19 @@ def _post_mortem(
 
     if len(candidates) > 1:
         print("actbreak: multiple job containers are still alive; attach manually:", file=sys.stderr)
-        for c in candidates:
+        for job, c in matched:
             print(f"  {_attach_command_str(engine, c.name, shells[0])}", file=sys.stderr)
+            park(job, c)
+        print("actbreak: 'actbreak clean' removes them when you're done.", file=sys.stderr)
         return exit_code
 
-    container = candidates[0]
+    job, container = matched[0]
     print(f"actbreak: post-mortem container: {container.name}")
     print(f"actbreak: attach with: {_attach_command_str(engine, container.name, shells[0])}")
-    if not no_attach:
+    if no_attach:
+        park(job, container)
+        print("actbreak: --no-attach given; the container is kept. Run 'actbreak clean' when you're done.")
+    else:
         runner.exec_interactive(engine, container.name, shells=shells)
         runner.rm_container(engine, container.name)
     return exit_code
@@ -401,7 +429,10 @@ def cmd_run(args) -> int:
                 print(f"actbreak: container: {container.name}")
                 print(f"actbreak: attach with: {_attach_command_str(engine, container.name, shells[0])}")
                 if args.no_attach:
-                    _record_session(container, engine, tmpdir, workflow_path, job_name, label, position, remaining)
+                    _record_session(
+                        container, engine, tmpdir, workflow_path, job_name, label, position, remaining,
+                        shell=shell,
+                    )
                     print(
                         "actbreak: --no-attach given; the container stays paused. "
                         "Run 'actbreak resume' to continue, or 'actbreak clean' to abort."
@@ -420,7 +451,10 @@ def cmd_run(args) -> int:
             exit_code = proc.wait()
 
         if args.break_on_failure and exit_code != 0:
-            exit_code = _post_mortem(runner, engine, job_name, jobs, workflow_hint, args.no_attach, exit_code, shells)
+            exit_code = _post_mortem(
+                runner, engine, workflow_path, job_name, jobs, workflow_hint, args.no_attach, exit_code,
+                shells, shell=shell,
+            )
         else:
             # The job ran to completion (resumed through the hold, never hit
             # it, or a --break-on-failure run that passed). --reuse left its
@@ -496,9 +530,20 @@ def cmd_resume(args) -> int:
     if not sessions:
         print("actbreak: no held sessions to resume", file=sys.stderr)
         return 1
+    # A post-mortem container has no hold to drop: act already exited. Leave
+    # it for `clean` and say so, rather than touching it.
+    unresolved = [s for s in sessions if s.get("post_mortem")]
+    sessions = [s for s in sessions if not s.get("post_mortem")]
+    for s in unresolved:
+        print(
+            f"actbreak: nothing to resume in {s.get('container_name', '?')}: it's a post-mortem "
+            "container and act has already exited. Run 'actbreak clean' to remove it.",
+            file=sys.stderr,
+        )
+    if not sessions:
+        return 1
     runner = CommandRunner()
     ok = True
-    unresolved = []
     for i, s in enumerate(sessions):
         try:
             removed = runner.rm_file(s["runtime"], s["container_id"], "/tmp/actbreak/hold")
@@ -564,7 +609,8 @@ def cmd_resume(args) -> int:
             next_label, next_position = pending[0]
             print(f"actbreak: breakpoint hit -- step '{next_label}' ({next_position})")
             print(f"actbreak: container: {s['container_name']}")
-            print(f"actbreak: attach with: {_attach_command_str(s['runtime'], s['container_name'])}")
+            attach = _attach_command_str(s["runtime"], s["container_name"], s.get("shell") or "sh")
+            print(f"actbreak: attach with: {attach}")
             print("actbreak: run 'actbreak resume' again to continue, or 'actbreak clean' to abort.")
             s = dict(s, label=next_label, position=next_position, pending=pending[1:])
             unresolved.append(s)
@@ -587,19 +633,40 @@ def cmd_resume(args) -> int:
     return 0 if ok else 1
 
 
+def _container_gone(runner: CommandRunner, engine: str, container_id: str) -> bool:
+    """True only when the engine answers and doesn't list the container. A
+    listing that fails (daemon down, runtime uninstalled) proves nothing."""
+    try:
+        containers = runner.ps(engine, all_containers=True, strict=True)
+    except Exception:
+        return False
+    return all(c.id != container_id for c in containers)
+
+
 def cmd_clean(args) -> int:
     sessions = _load_sessions()
     runner = CommandRunner()
+    ok = True
+    kept = []
     for s in sessions:
+        name = s.get("container_name", s.get("container_id", "?"))
         try:
-            if runner.rm_container(s["runtime"], s["container_id"]):
-                print(f"actbreak: cleaned {s.get('container_name', s['container_id'])}")
-            else:
-                print(f"actbreak: failed to clean {s.get('container_name', '?')}", file=sys.stderr)
+            removed = runner.rm_container(s["runtime"], s["container_id"])
+            error = ""
         except Exception as e:  # defensive
-            print(f"actbreak: failed to clean {s.get('container_name', '?')}: {e}", file=sys.stderr)
+            removed = False
+            error = f": {e}"
+        if removed:
+            print(f"actbreak: cleaned {name}")
+        elif not error and _container_gone(runner, s["runtime"], s["container_id"]):
+            print(f"actbreak: {name} was already gone")
+        else:
+            ok = False
+            print(f"actbreak: failed to clean {name}{error}; keeping it for the next 'actbreak clean'", file=sys.stderr)
+            kept.append(s)
+            continue
         _cleanup_tmpdir(s.get("tmpdir"))
-    _save_sessions([])
+    _save_sessions(kept)
 
     # Best-effort sweep for stray act-* containers we lost track of (e.g. the
     # state file was deleted, or actbreak crashed before recording a session).
@@ -614,9 +681,12 @@ def cmd_clean(args) -> int:
             if not c.name.lower().startswith("act-"):
                 continue
             if runner.file_exists(engine, c.id, "/tmp/actbreak/hold"):
-                runner.rm_container(engine, c.id)
-                print(f"actbreak: cleaned stray container {c.name}")
-    return 0
+                if runner.rm_container(engine, c.id):
+                    print(f"actbreak: cleaned stray container {c.name}")
+                else:
+                    ok = False
+                    print(f"actbreak: failed to clean stray container {c.name}", file=sys.stderr)
+    return 0 if ok else 1
 
 
 # ---------------------------------------------------------------------------
@@ -726,5 +796,9 @@ def cmd_list(args) -> int:
         workflow = s.get("workflow") or "?"
         age = _session_age(s.get("created_at"))
         age_suffix = f", held for {age}" if age else ""
-        print(f"  {name} [{status}] -- job '{job}', step '{label}' ({position}){age_suffix} -- {workflow}")
+        if s.get("post_mortem"):
+            where = f"post-mortem after act exited {s.get('exit_code', '?')}"
+        else:
+            where = f"step '{label}' ({position})"
+        print(f"  {name} [{status}] -- job '{job}', {where}{age_suffix} -- {workflow}")
     return 0

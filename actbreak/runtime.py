@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .errors import AmbiguousContainerError, ContainerNotFoundError, ToolNotFoundError
+from .errors import ActbreakError, AmbiguousContainerError, ContainerNotFoundError, ToolNotFoundError
 
 PS_FORMAT = "{{.ID}}\t{{.Names}}\t{{.Status}}"
 
@@ -158,11 +158,15 @@ class CommandRunner:
     def __init__(self, run=subprocess.run):
         self._run = run
 
-    def ps(self, engine: str, all_containers: bool = False) -> list[Container]:
+    def ps(self, engine: str, all_containers: bool = False, strict: bool = False) -> list[Container]:
+        """With strict=True a failed listing raises instead of reading as "no
+        containers", for callers that act on a container being absent."""
         args = [engine, "ps", "--format", PS_FORMAT]
         if all_containers:
             args.append("-a")
         result = self._run(args, capture_output=True, text=True, check=False)
+        if strict and getattr(result, "returncode", 1) != 0:
+            raise ActbreakError(f"'{engine} ps' failed (exit {getattr(result, 'returncode', '?')})")
         return parse_ps_output(result.stdout or "")
 
     def file_exists(self, engine: str, container: str, path: str) -> bool:

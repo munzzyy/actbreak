@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 
-from actbreak.errors import AmbiguousContainerError, ContainerNotFoundError, ToolNotFoundError
+from actbreak.errors import ActbreakError, AmbiguousContainerError, ContainerNotFoundError, ToolNotFoundError
 from actbreak.runtime import (
     CommandRunner,
     Container,
@@ -209,6 +209,12 @@ class CommandRunnerTests(unittest.TestCase):
         runner = CommandRunner(run=fake)
         runner.ps("docker", all_containers=True)
         self.assertIn("-a", fake.calls[-1])
+
+    def test_strict_ps_raises_when_the_listing_fails(self):
+        runner = CommandRunner(run=FakeRunner(default=FakeResult(returncode=1)))
+        self.assertEqual(runner.ps("docker"), [])
+        with self.assertRaises(ActbreakError):
+            runner.ps("docker", strict=True)
 
     def test_file_exists_true_and_false(self):
         fake = FakeRunner(default=FakeResult(returncode=0))
