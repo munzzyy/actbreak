@@ -18,11 +18,13 @@ Zero runtime dependencies. Python 3.9+, stdlib only.
 
 Early / v0.3.0, which isn't released yet. [CHANGELOG.md](CHANGELOG.md) lists
 what changed. The injection, selection and session logic is unit tested
-against fakes. One CI job also runs real breakpoints through real `act` and
-Docker. One case injects the hold, waits for the job container to reach it,
-and releases it. Another runs `actbreak run --matrix ... --no-attach` and
-`actbreak clean` as commands against a two-leg matrix. `resume` and the
-rest of the commands are covered by the unit tests only.
+against fakes. One CI job also runs the commands themselves against real
+`act` and Docker. It parks a job with `run --no-attach`, checks `list`, and
+`resume`s it until its container is gone, once for a plain job and once for
+a job with its own `name:`. It runs a failing job with `--break-on-failure
+--no-attach`, execs into the post-mortem container and `clean`s it. It also
+runs one leg of a two-leg matrix with `--matrix`. Attaching a shell, `steps`
+and `init-vscode` are covered by the unit tests only.
 
 ## Install
 
@@ -322,12 +324,11 @@ workflows.
   release workflow yet. Adding that is a setting on pypi.org behind the
   maintainer's login. Until then, install from git as [Install](#install)
   says.
-- Reports from real projects. Most commands are only tested against fakes
-  so far (see [Status](#status)). `resume`, `clean` and `--break-on-failure`
-  depend on how act names its containers and what `act --reuse` leaves
-  running, and only real act can settle that. Jobs that set their own
-  `name:` are the case most worth trying. If something misbehaves, an issue
-  with the workflow and your act version helps the most.
+- Reports from real projects. CI runs the commands against real act, but
+  only on a few small workflows and one act version (see [Status](#status)).
+  Big workflows, Podman, and other act versions are untried. If something
+  misbehaves, an issue with the workflow and your act version helps the
+  most.
 
 ## License
 
