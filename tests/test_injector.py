@@ -576,5 +576,60 @@ class InvisibleLineBreakTests(unittest.TestCase):
         self.assertIn("build", jobs)
 
 
+class JobDisplayNameTests(unittest.TestCase):
+    """act names a job's container after the job's own `name:` when it has
+    one, so the parse keeps that value for container discovery."""
+
+    def _jobs(self, text):
+        return injector.parse_workflow(text.splitlines(keepends=True))
+
+    def test_a_job_name_is_read(self):
+        jobs = self._jobs(
+            "name: Named job check\non: push\njobs:\n  test:\n    name: Unit suite\n"
+            "    runs-on: ubuntu-latest\n    steps:\n      - name: one\n        run: echo 1\n"
+        )
+        self.assertEqual(jobs["test"].display_name, "Unit suite")
+
+    def test_a_job_without_a_name_has_none(self):
+        jobs = self._jobs(
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - name: Build\n        run: make\n"
+        )
+        self.assertIsNone(jobs["build"].display_name)
+
+    def test_a_name_after_the_steps_is_still_the_jobs(self):
+        jobs = self._jobs(
+            "on: push\njobs:\n  build:\n    steps:\n      - name: Build\n        run: make\n"
+            "    name: 'Build: release'\n    runs-on: ubuntu-latest\n"
+        )
+        self.assertEqual(jobs["build"].display_name, "Build: release")
+
+    def test_nested_name_keys_are_not_the_jobs(self):
+        jobs = self._jobs(
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    environment:\n      name: production\n"
+            "    steps:\n      - uses: actions/upload-artifact@v4\n        with:\n          name: dist\n"
+        )
+        self.assertIsNone(jobs["build"].display_name)
+
+    def test_flush_left_steps_do_not_lend_their_name_to_the_job(self):
+        jobs = self._jobs(
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "    - name: Build\n      run: make\n"
+        )
+        self.assertIsNone(jobs["build"].display_name)
+        self.assertEqual([s.name for s in jobs["build"].steps], ["Build"])
+
+    def test_each_job_keeps_its_own_name(self):
+        jobs = self._jobs(
+            "on: push\njobs:\n"
+            "  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ruff .\n"
+            "  test:\n    name: \"Tests (${{ matrix.os }})\"  # shown in the UI\n"
+            "    runs-on: ubuntu-latest\n    steps:\n      - run: pytest\n"
+        )
+        self.assertIsNone(jobs["lint"].display_name)
+        self.assertEqual(jobs["test"].display_name, "Tests (${{ matrix.os }})")
+
+
 if __name__ == "__main__":
     unittest.main()

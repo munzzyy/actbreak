@@ -180,6 +180,11 @@ def _never_reached(job: str, missed: list) -> str:
     return f"actbreak: {noun} never reached -- job '{job}', {where}"
 
 
+def _display_name(jobs, job: str | None) -> str | None:
+    info = jobs.get(job) if isinstance(jobs, dict) else None
+    return getattr(info, "display_name", None)
+
+
 def _match_run_jobs(
     containers: list[Container], job_name: str | None, jobs, workflow_hint: str | None
 ) -> list[tuple[str, Container]]:
@@ -193,7 +198,7 @@ def _match_run_jobs(
     matched: list[tuple[str, Container]] = []
     for name in names:
         try:
-            container = find_job_container(containers, name, workflow_hint)
+            container = find_job_container(containers, name, workflow_hint, _display_name(jobs, name))
         except ContainerNotFoundError:
             # Not found for this job, or ambiguous (AmbiguousContainerError is
             # a subclass) -- either way, don't guess.
@@ -266,6 +271,7 @@ def wait_for_breakpoint(
     interrupt_check,
     timeout: float = DEFAULT_TIMEOUT,
     shell: str = "sh",
+    display_name: str | None = None,
 ) -> Container | None:
     """Poll until the job's container exists and has hit the hold, act exits
     first, or `timeout` elapses (a timeout of 0 never elapses). Returns None
@@ -283,7 +289,7 @@ def wait_for_breakpoint(
             )
         try:
             containers = runner.ps(engine)
-            container = find_job_container(containers, job_name, workflow_hint)
+            container = find_job_container(containers, job_name, workflow_hint, display_name)
         except AmbiguousContainerError as e:
             # More than one candidate container is never going to resolve
             # itself by waiting -- surface it now instead of spinning for
@@ -304,14 +310,14 @@ def wait_for_breakpoint(
 
 
 def _parked_job_containers(
-    runner: CommandRunner, engine: str, job_names: list[str], workflow_hint: str | None
+    runner: CommandRunner, engine: str, job_names: list[str], workflow_hint: str | None, jobs=None
 ) -> list[Container]:
     """Running containers wait_for_breakpoint would take for one of these jobs."""
     containers = runner.ps(engine)
     found: list[Container] = []
     for job in job_names:
         try:
-            candidates = [find_job_container(containers, job, workflow_hint)]
+            candidates = [find_job_container(containers, job, workflow_hint, _display_name(jobs, job))]
         except AmbiguousContainerError as e:
             candidates = [c for c in containers if c.name in e.candidates]
         except ContainerNotFoundError:
@@ -321,7 +327,7 @@ def _parked_job_containers(
 
 
 def _refuse_if_job_parked(
-    runner: CommandRunner, engine: str, workflow: Path, job_names: list[str], workflow_hint: str | None
+    runner: CommandRunner, engine: str, workflow: Path, job_names: list[str], workflow_hint: str | None, jobs=None
 ) -> None:
     """Raise SessionError while one of these jobs still has a container held
     at a breakpoint. A new run would find that hold on its first poll and
@@ -348,7 +354,7 @@ def _refuse_if_job_parked(
         )
 
     known = {s.get("container_id") for s in sessions}
-    for c in _parked_job_containers(runner, engine, job_names, workflow_hint):
+    for c in _parked_job_containers(runner, engine, job_names, workflow_hint, jobs):
         if c.id not in known and runner.file_exists(engine, c.id, "/tmp/actbreak/hold"):
             raise SessionError(
                 f"{c.name} ({c.id}) is still holding at an actbreak breakpoint that no session "
@@ -431,6 +437,14 @@ def cmd_run(args) -> int:
     hold_sequence: list[tuple[str, str]] = []
     if breakpoint_requested:
         job_name, targets = resolve_breakpoints(jobs, breakpoints, args.job)
+        display_name = _display_name(jobs, job_name)
+        if display_name and "${{" in display_name:
+            print(
+                f"actbreak: job '{job_name}' has an expression in its name: '{display_name}'. act names the "
+                "container after the result, which actbreak can't work out, so the breakpoint wait may run "
+                "until --timeout",
+                file=sys.stderr,
+            )
         tmpdir = tempfile.mkdtemp(prefix="actbreak-")
         dest = str(Path(tmpdir) / workflow_path.name)
         hold_sequence = injector.inject_multi_file(str(workflow_path), dest, targets)
@@ -443,7 +457,9 @@ def cmd_run(args) -> int:
     engine = detect_runtime(args.runtime)
     runner = CommandRunner()
     try:
-        _refuse_if_job_parked(runner, engine, workflow_path, [job_name] if job_name else list(jobs), workflow_hint)
+        _refuse_if_job_parked(
+            runner, engine, workflow_path, [job_name] if job_name else list(jobs), workflow_hint, jobs
+        )
     except SessionError:
         _cleanup_tmpdir(tmpdir)
         raise
@@ -481,7 +497,7 @@ def cmd_run(args) -> int:
             while True:
                 container = wait_for_breakpoint(
                     proc, runner, engine, job_name, workflow_hint, interrupt_check,
-                    timeout=timeout, shell=shells[0],
+                    timeout=timeout, shell=shells[0], display_name=_display_name(jobs, job_name),
                 )
                 if container is None:
                     exit_code = proc.wait()

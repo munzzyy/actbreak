@@ -1,7 +1,8 @@
 """Container runtime detection (docker/podman) and `act` container discovery.
 
 act names the containers it starts after the workflow and job, e.g.
-`act-Build-and-Test-build-...`. We list running containers with a fixed,
+`act-Build-and-Test-build-<sha256>`, using the job's own `name:` in place of
+its id when it has one. We list running containers with a fixed,
 tab-separated Go template so docker and podman (podman's CLI is
 docker-compatible) produce identical output, then match on a normalized
 substring of the job (and optionally workflow) name.
@@ -79,13 +80,23 @@ def _job_in_name(name: str, job: str) -> bool:
     return any(ntoks[i:i + len(jtoks)] == jtoks for i in range(len(ntoks) - len(jtoks) + 1))
 
 
+def _container_job_name(job: str, display_name: str | None = None) -> str:
+    """What act puts in the container name for a job: its `name:` when that
+    is plain text, else the job id. A `name:` with a `${{ }}` expression is
+    interpolated by act first, so there is no way to predict it here."""
+    if display_name and "${{" not in display_name and _name_tokens(display_name):
+        return display_name
+    return job
+
+
 def find_job_container(
-    containers: list[Container], job: str, workflow: str | None = None
+    containers: list[Container], job: str, workflow: str | None = None, display_name: str | None = None
 ) -> Container:
     """Find the single container act started for `job` (optionally narrowed
-    by `workflow`). Raises ContainerNotFoundError if there's none or more
-    than one match."""
-    candidates = [c for c in containers if c.name.lower().startswith("act-") and _job_in_name(c.name, job)]
+    by `workflow`). `display_name` is the job's own `name:`, if it has one.
+    Raises ContainerNotFoundError if there's none or more than one match."""
+    in_name = _container_job_name(job, display_name)
+    candidates = [c for c in containers if c.name.lower().startswith("act-") and _job_in_name(c.name, in_name)]
 
     if workflow:
         nwf = normalize_name(workflow)
@@ -95,8 +106,9 @@ def find_job_container(
 
     if not candidates:
         seen = ", ".join(c.name for c in containers if c.name.lower().startswith("act-")) or "none"
+        named = f" (name: '{in_name}')" if in_name != job else ""
         raise ContainerNotFoundError(
-            f"no running act container found for job '{job}' (act containers seen: {seen})"
+            f"no running act container found for job '{job}'{named} (act containers seen: {seen})"
         )
     if len(candidates) > 1:
         names = [c.name for c in candidates]

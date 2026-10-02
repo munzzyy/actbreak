@@ -16,6 +16,8 @@ from actbreak.runtime import (
     require_act,
 )
 
+from .util import act_container_name
+
 # Canned `docker ps --format {{.ID}}\t{{.Names}}\t{{.Status}}` / podman-equivalent
 # output. Both engines produce identical shapes here since we fix the format string
 # ourselves, so one fixture set covers both.
@@ -159,6 +161,53 @@ class FindJobContainerTests(unittest.TestCase):
         containers = [Container(id="x", name="act-Build-and-Test-build")]
         with self.assertRaises(ContainerNotFoundError):
             find_job_container(containers, "a")
+
+
+class ActStyleNameTests(unittest.TestCase):
+    """Names built the way act builds them: the job's own `name:` in place of
+    its id when it has one, and a sha256 suffix."""
+
+    def test_the_helper_gives_the_shape_act_uses(self):
+        self.assertTrue(act_container_name("CI", "build").startswith("act-CI-build-"))
+        self.assertEqual(len(act_container_name("CI", "build")), len("act-CI-build-") + 64)
+
+    def test_a_job_without_a_name_is_found_by_its_id(self):
+        name = act_container_name("actbreak integration smoke", "smoke")
+        c = find_job_container([Container(id="x", name=name)], "smoke", workflow="actbreak integration smoke")
+        self.assertEqual(c.name, name)
+
+    def test_a_job_with_a_name_is_found_by_that_name(self):
+        name = act_container_name("Named job check", "Unit suite")
+        containers = [Container(id="x", name=name)]
+        with self.assertRaises(ContainerNotFoundError):
+            find_job_container(containers, "test", workflow="Named job check")
+        c = find_job_container(containers, "test", workflow="Named job check", display_name="Unit suite")
+        self.assertEqual(c.id, "x")
+
+    def test_a_named_job_does_not_take_a_container_named_after_its_id(self):
+        containers = [Container(id="other", name=act_container_name("CI", "test"))]
+        with self.assertRaises(ContainerNotFoundError) as ctx:
+            find_job_container(containers, "test", workflow="CI", display_name="Unit suite")
+        self.assertIn("name: 'Unit suite'", str(ctx.exception))
+
+    def test_a_name_with_an_expression_falls_back_to_the_id(self):
+        containers = [Container(id="x", name=act_container_name("CI", "test"))]
+        c = find_job_container(containers, "test", workflow="CI", display_name="Tests (${{ matrix.os }})")
+        self.assertEqual(c.id, "x")
+
+    def test_a_name_with_no_letters_or_digits_falls_back_to_the_id(self):
+        containers = [Container(id="x", name=act_container_name("CI", "test"))]
+        self.assertEqual(find_job_container(containers, "test", display_name="--").id, "x")
+
+    def test_matrix_legs_of_a_named_job_are_reported_as_a_matrix(self):
+        containers = [
+            Container(id="1", name=act_container_name("Matrix CI", "Unit suite-1")),
+            Container(id="2", name=act_container_name("Matrix CI", "Unit suite-2")),
+        ]
+        with self.assertRaises(AmbiguousContainerError) as ctx:
+            find_job_container(containers, "test", workflow="Matrix CI", display_name="Unit suite")
+        self.assertIn("matrix", str(ctx.exception))
+        self.assertEqual(len(ctx.exception.candidates), 2)
 
 
 class DetectRuntimeTests(unittest.TestCase):

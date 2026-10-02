@@ -24,7 +24,7 @@ from actbreak.errors import SelectorError, SessionError
 from actbreak.runtime import CommandRunner, Container
 from actbreak.selector import resolve_selector
 
-from .util import fixture_path
+from .util import act_container_name, fixture_path
 
 # Canned `ps --format {{.ID}}\t{{.Names}}\t{{.Status}}` output, same shape
 # tests/test_runtime.py uses.
@@ -40,6 +40,12 @@ NO_MATCH_PS = "c9\tunrelated-container\tUp 1 hour\n"
 class FakeResult:
     stdout: str = ""
     returncode: int = 0
+
+NAMED_JOB_WORKFLOW = (
+    "name: Named job check\non: push\njobs:\n  test:\n    name: Unit suite\n    runs-on: ubuntu-latest\n"
+    "    steps:\n      - name: one\n        run: exit 1\n      - name: two\n        run: echo 2\n"
+)
+NAMED_JOB_CONTAINER = act_container_name("Named job check", "Unit suite")
 
 
 class FakeRunFn:
@@ -272,6 +278,16 @@ class WaitForBreakpointTests(unittest.TestCase):
             proc, runner, "docker", "build", None, _no_interrupt, timeout=5
         )
         self.assertEqual(container.name, "act-CI-build")
+
+    def test_a_job_with_its_own_name_is_found_by_that_name(self):
+        runner = CommandRunner(run=FakeRunFn(
+            {"ps": FakeResult(stdout=f"n1\t{NAMED_JOB_CONTAINER}\tUp 1 minute\n"), "test -f": FakeResult(returncode=0)}
+        ))
+        container = session.wait_for_breakpoint(
+            FakePopen(running=True), runner, "docker", "test", "Named job check", _no_interrupt,
+            timeout=5, display_name="Unit suite",
+        )
+        self.assertEqual(container.id, "n1")
 
     def test_act_exiting_before_the_hold_returns_none(self):
         runner = CommandRunner(run=FakeRunFn({"ps": FakeResult(stdout=NO_MATCH_PS)}))
@@ -817,6 +833,54 @@ class CmdRunCleanupTests(unittest.TestCase):
             parked = {(s["container_id"], s["job"]) for s in session._load_sessions()}
         self.assertEqual(parked, {("c1", "build"), ("c2", "test")})
 
+    def _named_job_workflow(self):
+        wf = self.repo_root / ".github" / "workflows" / "named.yml"
+        wf.write_text(NAMED_JOB_WORKFLOW)
+        return wf
+
+    def test_a_named_job_is_waited_for_and_reaped_by_its_name(self):
+        wf = self._named_job_workflow()
+        popen = FakePopen(running=True, exit_code=0)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=f"n1\t{NAMED_JOB_CONTAINER}\tUp 1 minute\n")})
+        hit = Container(id="n1", name=NAMED_JOB_CONTAINER)
+        patchers = self._patched(popen, fake_run, [hit])
+        with _patch_all(patchers):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = session.cmd_run(_run_args(workflow=str(wf), breakpoints=[("before", "test:1")]))
+            wait_kwargs = session.wait_for_breakpoint.call_args.kwargs
+        self.assertEqual(rc, 0)
+        self.assertEqual(wait_kwargs.get("display_name"), "Unit suite")
+        self.assertIn(["docker", "rm", "-f", NAMED_JOB_CONTAINER], fake_run.calls)
+
+    def test_a_name_with_an_expression_gets_a_warning_and_a_plain_one_does_not(self):
+        templated = self.repo_root / ".github" / "workflows" / "templated.yml"
+        templated.write_text(NAMED_JOB_WORKFLOW.replace("name: Unit suite", "name: Tests (${{ matrix.os }})"))
+        hit = Container(id="n1", name=NAMED_JOB_CONTAINER)
+        errs = []
+        for wf in (templated, self._named_job_workflow()):
+            errs.append(io.StringIO())
+            patchers = self._patched(FakePopen(running=True), FakeRunFn(), [hit])
+            with _patch_all(patchers), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errs[-1]):
+                session.cmd_run(_run_args(workflow=str(wf), breakpoints=[("before", "test:1")], no_attach=True))
+        self.assertIn("job 'test' has an expression in its name: 'Tests (${{ matrix.os }})'", errs[0].getvalue())
+        self.assertNotIn("expression", errs[1].getvalue())
+
+    def test_a_failed_named_job_gets_its_post_mortem(self):
+        wf = self._named_job_workflow()
+        popen = FakePopen(running=False, exit_code=1)
+        fake_run = FakeRunFn({"ps": FakeResult(stdout=f"n1\t{NAMED_JOB_CONTAINER}\tUp 1 second\n")})
+        patchers = self._patched(popen, fake_run, lambda *a, **k: None)
+        out = io.StringIO()
+        with _patch_all(patchers):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                rc = session.cmd_run(
+                    _run_args(workflow=str(wf), breakpoints=[], break_on_failure=True, no_attach=True)
+                )
+            parked = [(s["container_id"], s["job"]) for s in session._load_sessions()]
+        self.assertEqual(rc, 1)
+        self.assertIn(f"post-mortem container: {NAMED_JOB_CONTAINER}", out.getvalue())
+        self.assertEqual(parked, [("n1", "test")])
+
     def test_no_attach_hold_does_not_reap_the_container(self):
         # Regression guard: the intentionally-held --no-attach container must
         # survive so `actbreak resume` can still reach it.
@@ -974,6 +1038,17 @@ class ParkedJobRefusalTests(unittest.TestCase):
         self.assertIn("act-Build-and-Test-build (s1)", str(ctx.exception))
         self.assertIn("'docker rm -f act-Build-and-Test-build'", str(ctx.exception))
         self.assertIn(["docker", "exec", "s1", "test", "-f", "/tmp/actbreak/hold"], self.calls)
+
+    def test_an_unrecorded_hold_on_a_named_job_blocks(self):
+        wf = Path(self.tmp.name) / "named.yml"
+        wf.write_text(NAMED_JOB_WORKFLOW)
+        self.workflow = str(wf)
+        self.ps_all = self.ps_running = f"s1\t{NAMED_JOB_CONTAINER}\tUp 5 minutes\n"
+        self.hold_rc = 0
+        with self.assertRaises(SessionError) as ctx:
+            self._cmd_run(breakpoints=[("before", "test:1")])
+        self.popen.assert_not_called()
+        self.assertIn(f"{NAMED_JOB_CONTAINER} (s1)", str(ctx.exception))
 
     def test_an_unrecorded_container_without_a_hold_does_not_block(self):
         self.ps_all = self.ps_running = "s1\tact-Build-and-Test-build\tUp 5 minutes\n"

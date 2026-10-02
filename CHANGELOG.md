@@ -64,6 +64,11 @@ Fixes:
   job container along with act.
 - Workflows containing U+2028, U+2029 or U+0085 are rejected with the line
   number instead of being split into the wrong steps.
+- A job with its own `name:` gets found. act names the job's container
+  after that name, not the job id, so `run` used to wait for a container
+  that never showed up, and cleanup and post-mortem missed it the same way.
+  actbreak cannot predict a `name:` with an expression in it, and `run`
+  warns about that when it starts.
 
 Project:
 

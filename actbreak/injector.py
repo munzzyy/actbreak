@@ -72,6 +72,7 @@ class JobInfo:
     end: int
     step_item_indent: int | None  # column of `- ` for this job's steps, if any
     steps: list[StepInfo] = field(default_factory=list)
+    display_name: str | None = None  # the job's own `name:`, which act names its container after
 
 
 def _rstrip_eol(line: str) -> str:
@@ -236,7 +237,23 @@ def _step_body_columns(lines: list[str], start: int, end: int, dash_indent: int)
 
 
 def _extract_step_name(lines: list[str], start: int, end: int, dash_indent: int) -> str | None:
-    items = _step_body_columns(lines, start, end, dash_indent)
+    return _name_value(_step_body_columns(lines, start, end, dash_indent))
+
+
+def _extract_job_name(lines: list[str], job: JobInfo) -> str | None:
+    items = []
+    for line in lines[job.start + 1 : job.end]:
+        if _is_blank_or_comment(line):
+            continue
+        text = _rstrip_eol(line)
+        col = _indent(text)
+        items.append((col, text[col:]))
+    return _name_value(items)
+
+
+def _name_value(items: list[tuple[int, str]]) -> str | None:
+    """The `name:` value among the (column, text) key lines of one block,
+    looking only at keys on the block's own column (the first item's)."""
     if not items:
         return None
     body_col = items[0][0]
@@ -379,6 +396,7 @@ def parse_workflow(lines: list[str]) -> dict[str, JobInfo]:
         name = _dequote(m.group(2))
         end = _next_boundary(lines, i + 1, len(lines), job_indent)
         job = JobInfo(name=name, start=i, end=end, step_item_indent=None)
+        job.display_name = _extract_job_name(lines, job)
         _parse_job_steps(lines, job)
         jobs[name] = job
         i = end

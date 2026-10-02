@@ -268,6 +268,11 @@ actbreak run ci.yml --break-before "Run tests" --matrix os:ubuntu-latest --matri
 - The breakpoint step needs a real shell in the job container: it runs `sh`
   with `mkdir`, `printf`, and `sleep`. A `scratch` or distroless image without
   those won't hold at the breakpoint.
+- act names a job's container after the job's `name:` when it has one. A
+  `name:` with an expression in it, like `Tests (${{ matrix.os }})`, is
+  filled in by act first, so actbreak can't predict the container's name.
+  `run` warns about it up front, and may wait until `--timeout` runs out.
+  Take the expression out of `name:` while you debug that job.
 - Attaching tries `sh`, then `bash`, unless `--shell` says otherwise. An image
   that needs something else (`zsh`, or a login shell via `bash -l`) needs
   `--shell` set explicitly.
