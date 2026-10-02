@@ -9,9 +9,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,17 +38,17 @@ TWO_MATCH_PS = (
 )
 NO_MATCH_PS = "c9\tunrelated-container\tUp 1 hour\n"
 
-
-@dataclass
-class FakeResult:
-    stdout: str = ""
-    returncode: int = 0
-
 NAMED_JOB_WORKFLOW = (
     "name: Named job check\non: push\njobs:\n  test:\n    name: Unit suite\n    runs-on: ubuntu-latest\n"
     "    steps:\n      - name: one\n        run: exit 1\n      - name: two\n        run: echo 2\n"
 )
 NAMED_JOB_CONTAINER = act_container_name("Named job check", "Unit suite")
+
+
+@dataclass
+class FakeResult:
+    stdout: str = ""
+    returncode: int = 0
 
 
 class FakeRunFn:
@@ -77,9 +80,10 @@ class FakePopen:
     """Minimal stand-in for subprocess.Popen -- only the surface cmd_run and
     wait_for_breakpoint actually touch."""
 
-    def __init__(self, running=True, exit_code=0):
+    def __init__(self, running=True, exit_code=0, pid=4242):
         self.running = running
         self.exit_code = exit_code
+        self.pid = pid
         self.terminated = False
         self.killed = False
         self.wait_calls = 0
@@ -537,6 +541,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         sessions = json.loads((state_dir / "state.json").read_text())["sessions"]
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["container_name"], "act-CI-build")
+        self.assertEqual(sessions[0]["act_pid"], 4242)
 
     def test_clean_completion_reaps_the_reuse_container(self):
         # Breakpoint hit, attached, resumed, job runs to the end. --reuse
@@ -710,7 +715,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         )
         popen = FakePopen(running=False, exit_code=0)
         fake_run = FakeRunFn(
-            {"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\nc2\tact-CI-test\tExited (0)\n")}
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 5 seconds\nc2\tact-CI-test\tUp 5 seconds\n")}
         )
         patchers = self._patched(popen, fake_run, lambda *a, **k: None)
         with _patch_all(patchers):
@@ -740,7 +745,7 @@ class CmdRunCleanupTests(unittest.TestCase):
                 return self.exit_code
 
         popen = InterruptingPopen()
-        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\n")})
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\n")})
         patchers = self._patched(popen, fake_run, lambda *a, **k: None)
         with _patch_all(patchers):
             args = _run_args(
@@ -880,6 +885,7 @@ class CmdRunCleanupTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn(f"post-mortem container: {NAMED_JOB_CONTAINER}", out.getvalue())
         self.assertEqual(parked, [("n1", "test")])
+        self.assertNotIn("act_pid", session._load_sessions()[0])
 
     def test_no_attach_hold_does_not_reap_the_container(self):
         # Regression guard: the intentionally-held --no-attach container must
@@ -1129,12 +1135,15 @@ class NeverReachedTests(unittest.TestCase):
         base = {
             "runtime": "docker", "container_id": "c1", "container_name": "act-Build-and-Test-build",
             "tmpdir": None, "workflow": self.workflow, "job": "build", "label": "Build", "position": "before",
+            "act_pid": 4242,
         }
-        self.fake_run.responses = {"ps": FakeResult(stdout="c1\tact-Build-and-Test-build\tExited (0) 1 second ago\n")}
+        self.fake_run.responses = {"ps": FakeResult(stdout="c1\tact-Build-and-Test-build\tUp 2 minutes\n")}
         for pending, expect in (([["Upload artifact", "after"]], True), ([], False)):
             session._save_sessions([dict(base, pending=pending)])
             err = io.StringIO()
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                    mock.patch.object(session, "_process_gone", return_value=True), \
+                    mock.patch.object(session, "DEFAULT_TIMEOUT", 0):
                 rc = session.cmd_resume(SimpleNamespace(session=None))
             self.assertEqual(rc, 0)
             self.assertEqual(session._load_sessions(), [])
@@ -1142,6 +1151,45 @@ class NeverReachedTests(unittest.TestCase):
                 self.assertIn("breakpoint never reached -- job 'build', step 'Upload artifact' (after)", err.getvalue())
             else:
                 self.assertNotIn("never reached", err.getvalue())
+
+
+class ProcessGoneTests(unittest.TestCase):
+    """resume watches act's PID, since the container act --reuse leaves keeps running."""
+
+    def _child(self):
+        return subprocess.Popen([sys.executable, "-c", "pass"])
+
+    @unittest.skipIf(os.name == "nt", "the PID check is POSIX only")
+    def test_a_live_process_is_not_gone(self):
+        self.assertFalse(session._process_gone(os.getpid()))
+
+    @unittest.skipIf(os.name == "nt", "the PID check is POSIX only")
+    def test_an_exited_and_reaped_process_is_gone(self):
+        child = self._child()
+        child.wait()
+        self.assertTrue(session._process_gone(child.pid))
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "zombies are read from /proc")
+    def test_an_exited_process_nobody_reaped_yet_is_gone(self):
+        child = self._child()
+        self.addCleanup(child.wait)
+        stat = Path(f"/proc/{child.pid}/stat")
+        for _ in range(500):
+            if stat.read_text().rpartition(")")[2].split()[0] == "Z":
+                break
+            time.sleep(0.01)
+        self.assertTrue(session._process_gone(child.pid))
+
+    def test_no_pid_or_a_nonsense_one_is_never_gone(self):
+        with mock.patch.object(session.os, "kill") as kill:
+            for pid in (None, 0, -1, "4242"):
+                self.assertFalse(session._process_gone(pid))
+        kill.assert_not_called()
+
+    def test_windows_never_probes_with_os_kill(self):
+        with mock.patch.object(session.os, "name", "nt"), mock.patch.object(session.os, "kill") as kill:
+            self.assertFalse(session._process_gone(4242))
+        kill.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1206,9 @@ class CmdResumeTests(unittest.TestCase):
         self._patchers = [
             mock.patch.object(session, "STATE_DIR", self.state_dir),
             mock.patch.object(session, "STATE_FILE", self.state_file),
+            # A resume that never sees the job finish gives up at once instead of hanging the suite.
+            mock.patch.object(session, "DEFAULT_TIMEOUT", 0),
+            mock.patch.object(session, "POLL_INTERVAL", 0),
         ]
         for p in self._patchers:
             p.start()
@@ -1200,10 +1251,29 @@ class CmdResumeTests(unittest.TestCase):
         rc = session.cmd_resume(None)
         self.assertEqual(rc, 1)
 
-    def test_resume_reaps_the_finished_container_so_it_is_not_leaked(self):
-        # After the hold is dropped, the job runs to the end and --reuse leaves
-        # the container stopped. resume must reap it by id (which works on a
-        # stopped container), not just drop the record and orphan it.
+    def test_resume_reaps_the_container_once_act_exits(self):
+        # After the hold is dropped the job runs to the end and act exits, but
+        # --reuse leaves the container running `tail -f /dev/null`. act's
+        # process going away is what says the job is done.
+        self._seed(
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None,
+              "act_pid": 4242}]
+        )
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 3 minutes\n")},
+            default=FakeResult(returncode=0),
+        )
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)), \
+                mock.patch.object(session, "_process_gone", return_value=True) as gone:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = session.cmd_resume(None)
+        self.assertEqual(rc, 0)
+        gone.assert_called_with(4242)
+        self.assertIn(["docker", "rm", "-f", "c1"], fake_run.calls)
+        self.assertEqual(session._load_sessions(), [])
+
+    def test_resume_without_a_recorded_act_pid_reaps_once_the_container_stops(self):
+        # State files from before act_pid was recorded still work the old way.
         self._seed(
             [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
         )
@@ -1212,13 +1282,10 @@ class CmdResumeTests(unittest.TestCase):
             default=FakeResult(returncode=0),
         )
         with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
-            rc = session.cmd_resume(None)
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = session.cmd_resume(None)
         self.assertEqual(rc, 0)
-        container_rm = [c for c in fake_run.calls if c[:2] == ["docker", "rm"]]
-        self.assertTrue(
-            container_rm, f"resume must reap the finished container, got: {fake_run.calls}"
-        )
-        self.assertIn("c1", container_rm[0])
+        self.assertIn(["docker", "rm", "-f", "c1"], fake_run.calls)
         self.assertEqual(session._load_sessions(), [])
 
     def test_resume_against_a_stopped_container_keeps_the_session_and_fails(self):
@@ -1280,6 +1347,7 @@ class CmdResumeTests(unittest.TestCase):
                     "label": "Install deps",
                     "position": "before",
                     "pending": [["Run tests", "after"]],
+                    "act_pid": 4242,
                 }
             ]
         )
@@ -1297,6 +1365,7 @@ class CmdResumeTests(unittest.TestCase):
         self.assertEqual(remaining[0]["label"], "Run tests")
         self.assertEqual(remaining[0]["position"], "after")
         self.assertEqual(remaining[0]["pending"], [])
+        self.assertEqual(remaining[0]["act_pid"], 4242)
         # It's still held, not reaped.
         self.assertEqual([c for c in fake_run.calls if c[:2] == ["docker", "rm"]], [])
 
@@ -1327,6 +1396,40 @@ class CmdResumeTests(unittest.TestCase):
         self.assertIn("gave up waiting for act-CI-build", err.getvalue())
         self.assertIn("actbreak clean", err.getvalue())
         self.assertEqual([s["container_id"] for s in session._load_sessions()], ["c1"])
+
+    def test_wait_and_reap_removes_a_running_container_once_act_is_gone(self):
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tUp 4 minutes\n")},
+                             default=FakeResult(returncode=0))
+        runner = CommandRunner(run=fake_run)
+        with mock.patch.object(session, "_process_gone", return_value=True) as gone:
+            result = session._wait_and_reap(runner, "docker", "c1", timeout=0, act_pid=4242)
+        self.assertIs(result, True)
+        gone.assert_called_with(4242)
+        self.assertIn(["docker", "rm", "-f", "c1"], fake_run.calls)
+
+    def test_wait_and_reap_keeps_waiting_while_act_runs(self):
+        fake_run = FakeRunFn({"ps": FakeResult(stdout="c1\tact-CI-build\tUp 4 minutes\n")},
+                             default=FakeResult(returncode=0))
+        runner = CommandRunner(run=fake_run)
+        with mock.patch.object(session, "_process_gone", return_value=False), \
+                mock.patch.object(session, "POLL_INTERVAL", 0):
+            result = session._wait_and_reap(runner, "docker", "c1", timeout=0, act_pid=4242)
+        self.assertEqual(result, "timeout")
+        self.assertEqual([c for c in fake_run.calls if c[:2] == ["docker", "rm"]], [])
+
+    def test_wait_and_reap_does_not_report_a_hit_after_act_is_gone(self):
+        # A hold file left in a container act no longer drives isn't a breakpoint anyone will reach.
+        fake_run = FakeRunFn(
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\n"), "test -f": FakeResult(returncode=0)},
+            default=FakeResult(returncode=0),
+        )
+        runner = CommandRunner(run=fake_run)
+        with mock.patch.object(session, "_process_gone", return_value=True):
+            result = session._wait_and_reap(
+                runner, "docker", "c1", timeout=5, pending=[("next", "before")], act_pid=4242
+            )
+        self.assertIs(result, True)
+        self.assertIn(["docker", "rm", "-f", "c1"], fake_run.calls)
 
     def test_wait_and_reap_treats_an_already_removed_container_as_done(self):
         fake_run = FakeRunFn({"ps": FakeResult(stdout="")}, default=FakeResult(returncode=0))
@@ -1362,14 +1465,16 @@ class CmdResumeTests(unittest.TestCase):
         # silent for as long as the rest of the workflow takes, which reads
         # as a hang.
         self._seed(
-            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None}]
+            [{"runtime": "docker", "container_id": "c1", "container_name": "act-CI-build", "tmpdir": None,
+              "act_pid": 4242}]
         )
         fake_run = FakeRunFn(
-            {"ps": FakeResult(stdout="c1\tact-CI-build\tExited (0)\n")},
+            {"ps": FakeResult(stdout="c1\tact-CI-build\tUp 1 minute\n")},
             default=FakeResult(returncode=0),
         )
         buf = io.StringIO()
-        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)):
+        with mock.patch.object(session, "CommandRunner", lambda: CommandRunner(run=fake_run)), \
+                mock.patch.object(session, "_process_gone", return_value=True):
             with contextlib.redirect_stdout(buf):
                 rc = session.cmd_resume(None)
         self.assertEqual(rc, 0)

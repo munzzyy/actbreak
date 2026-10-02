@@ -69,6 +69,10 @@ Fixes:
   that never showed up, and cleanup and post-mortem missed it the same way.
   actbreak cannot predict a `name:` with an expression in it, and `run`
   warns about that when it starts.
+- `resume` finishes when act does. `act --reuse` leaves the job container
+  running after act exits, so `resume` used to sit out its 30-minute limit
+  and leave the container behind. `run --no-attach` now records act's
+  process, and `resume` removes the container once that process is gone.
 
 Project:
 

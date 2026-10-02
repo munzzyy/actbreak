@@ -174,8 +174,8 @@ way so you can resume or clean it first. A container that still holds a
 breakpoint but has no recorded session blocks the run the same way.
 
 `actbreak resume` drops the hold and then waits for the job to finish, so it
-can reap the container instead of leaving a stopped one behind. That wait is
-the rest of your workflow, so it can sit there for a while. Ctrl-C stops
+can reap the container instead of leaving it behind. That wait is the rest
+of your workflow, so it can sit there for a while. Ctrl-C stops
 waiting and leaves the job running; `actbreak clean` reaps it afterwards. A
 session parked from a multi-breakpoint `run --no-attach` instead re-parks at
 the next breakpoint if the job reaches it before finishing, so `resume` steps
@@ -276,10 +276,13 @@ actbreak run ci.yml --break-before "Run tests" --matrix os:ubuntu-latest --matri
 - Attaching tries `sh`, then `bash`, unless `--shell` says otherwise. An image
   that needs something else (`zsh`, or a login shell via `bash -l`) needs
   `--shell` set explicitly.
-- `act --reuse` keeps the job container alive so you can attach to it. actbreak
-  reaps that container once the run finishes cleanly (resumed to the end, the
-  breakpoint never hit, or a `--break-on-failure` run that passed), so a normal
-  run doesn't leave a stopped container behind. The ones it keeps on purpose
+- `act --reuse` keeps the job container alive so you can attach to it, and it
+  stays running after act exits. actbreak reaps that container once the run
+  finishes cleanly (resumed to the end, the breakpoint never hit, or a
+  `--break-on-failure` run that passed), so a normal run doesn't leave one
+  behind. `resume` knows the job is done when act's process exits. It can't
+  check that on Windows, so there it waits out its 30-minute limit; Ctrl-C
+  and `actbreak clean` end it sooner. The ones it keeps on purpose
   are recorded so `actbreak list` shows them and `actbreak clean` removes them:
   a `--no-attach` breakpoint, parked for `actbreak resume` to pick up later, a
   `--break-on-failure --no-attach` post-mortem container, and the containers a

@@ -11,6 +11,7 @@ container, which is covered end-to-end by the CI integration test
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import signal
@@ -118,6 +119,7 @@ def _record_session(
     pending: list[tuple[str, str]] | None = None,
     shell: str | None = None,
     post_mortem_exit: int | None = None,
+    act_pid: int | None = None,
 ) -> None:
     entry = {
         "container_id": container.id,
@@ -140,6 +142,8 @@ def _record_session(
     if post_mortem_exit is not None:
         entry["post_mortem"] = True
         entry["exit_code"] = post_mortem_exit
+    if act_pid:
+        entry["act_pid"] = act_pid
     sessions = _load_sessions()
     sessions.append(entry)
     _save_sessions(sessions)
@@ -519,7 +523,7 @@ def cmd_run(args) -> int:
                 if args.no_attach:
                     _record_session(
                         container, engine, tmpdir, workflow_path, job_name, label, position, remaining,
-                        shell=shell,
+                        shell=shell, act_pid=proc.pid,
                     )
                     print(
                         "actbreak: --no-attach given; the container stays paused. "
@@ -577,19 +581,43 @@ def cmd_run(args) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _process_gone(pid) -> bool:
+    """True only when `pid` is known to have exited; False when it's alive
+    or there's no telling."""
+    if not isinstance(pid, int) or pid <= 0 or os.name == "nt":
+        # os.kill(pid, 0) terminates the process on Windows instead of probing it.
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            state = f.read().rpartition(")")[2].split()[:1]
+    except OSError:
+        return False
+    return state in (["Z"], ["X"])
+
+
 def _wait_and_reap(
     runner: CommandRunner,
     engine: str,
     container_id: str,
     timeout: float = DEFAULT_TIMEOUT,
     pending: list | None = None,
+    act_pid: int | None = None,
 ) -> bool | str:
-    """After `resume` drops the hold, the job runs on. Poll until it's no
-    longer running, then remove it by id -- rm by id works on a stopped
-    container, unlike the exec probe `clean`'s sweep uses. Returns True once
-    it's gone, 'timeout' if it's still running when `timeout` elapses, and
-    False if it couldn't be listed or removed. Either way the caller keeps
-    the session so `clean` can reap it by id later.
+    """After `resume` drops the hold, the job runs on. Poll until it's
+    finished, then remove its container by id. `act --reuse` leaves the
+    container running after act exits (its entrypoint is `tail -f
+    /dev/null`), so the job counts as finished once act's process, `act_pid`,
+    is gone. Sessions recorded without one fall back to waiting for the
+    container to stop. Returns True once it's gone, 'timeout' if it's still
+    running when `timeout` elapses, and False if it couldn't be listed or
+    removed. Either way the caller keeps the session so `clean` can reap it
+    by id later.
 
     If `pending` is a non-empty list of the breakpoints still ahead (from a
     multi-breakpoint run), also watches for the hold file reappearing --
@@ -604,7 +632,7 @@ def _wait_and_reap(
         match = next((c for c in containers if c.id == container_id), None)
         if match is None:
             return True  # act already removed it
-        if not match.status.lower().startswith("up"):
+        if not match.status.lower().startswith("up") or _process_gone(act_pid):
             return runner.rm_container(engine, container_id)
         if pending and runner.file_exists(engine, container_id, "/tmp/actbreak/hold"):
             return "hit"
@@ -695,7 +723,9 @@ def cmd_resume(args) -> int:
             f"(Ctrl-C to leave it running; 'actbreak clean' reaps it later)"
         )
         try:
-            result = _wait_and_reap(runner, s["runtime"], s["container_id"], pending=pending)
+            result = _wait_and_reap(
+                runner, s["runtime"], s["container_id"], DEFAULT_TIMEOUT, pending=pending, act_pid=s.get("act_pid")
+            )
         except KeyboardInterrupt:
             # "Stop watching", not "abort the job": this session and the ones behind it stay parked.
             print(
