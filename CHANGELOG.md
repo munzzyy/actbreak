@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-10-02)
 
 Licensed GPL-3.0-or-later from this release on. Earlier releases were under
 the Prosperity Public License 3.0.0, as the [README](README.md#license) says.

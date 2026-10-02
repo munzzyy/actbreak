@@ -16,7 +16,7 @@ Zero runtime dependencies. Python 3.9+, stdlib only.
 
 ## Status
 
-Early / v0.3.0, which isn't released yet. [CHANGELOG.md](CHANGELOG.md) lists
+Early / v0.3.0. [CHANGELOG.md](CHANGELOG.md) lists
 what changed. The injection, selection and session logic is unit tested
 against fakes. One CI job also runs the commands themselves against real
 `act` and Docker. It parks a job with `run --no-attach`, checks `list`, and
@@ -318,8 +318,7 @@ PATH, which in practice means it only runs in CI.
 What is left needs the maintainer, or people running actbreak on their own
 workflows.
 
-- Cut 0.3.0 and get it onto PyPI. Everything under 0.3.0 in
-  [CHANGELOG.md](CHANGELOG.md) is done, but there is no tag yet. PyPI
+- Getting 0.3.0 onto PyPI. The tag and the GitHub release exist; PyPI
   rejected the earlier uploads because the project there does not trust the
   release workflow yet. Adding that is a setting on pypi.org behind the
   maintainer's login. Until then, install from git as [Install](#install)
